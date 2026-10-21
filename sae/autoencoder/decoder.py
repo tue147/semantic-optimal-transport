@@ -9,25 +9,6 @@ from .types import TopK
 
 
 # NOTE: Avoid this where possible to save memory!
-def scatter_topk(topk: TopK, n_latents: int) -> Float[Tensor, "... n_latents"]:
-    """
-    Scatter the k largest latents into a new tensor of shape (..., n_latents).
-
-    Args:
-        topk (TopK): The k largest latents.
-
-        n_latents (int): The number of latents.
-
-    Returns:
-        out (Float[Tensor, "... n_latents"]): The k largest latents.
-    """
-
-    # ... n_latents
-    buffer = topk.values.new_zeros((*topk.indices.shape[:-1], n_latents))
-    # ... k -> ... n_latents
-    return buffer.scatter_(dim=-1, index=topk.indices, src=topk.values)
-
-
 # Based on https://github.com/EleutherAI/sae/blob/19d95a401e9d17dbf7d6fb0fa7a91081f1b0d01f/sae/utils.py
 def decode_triton(topk: TopK, weight: Tensor) -> Tensor:
     shape = topk.indices.shape[:-1]

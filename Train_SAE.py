@@ -35,7 +35,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_tokens', type=int, default=1_000_000_000, help='Maximum tokens for training')
     parser.add_argument('--layer', type=int, default=11, help='Layer to use for metric calculation')
     parser.add_argument('--hook_name', type=str, required=True, help='Hook name to use in training')
-    parser.add_argument('--sae_name', type=str, default="topk_custom", help='SAE name')
+    parser.add_argument('--sae_name', type=str, default="topk", help='SAE name')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--sparsity_coef', type=float, default=1e-2, help='The sparsity coefficient')
     parser.add_argument('--expansion_factor', type=float, default=0.5, help='Expansion factor')

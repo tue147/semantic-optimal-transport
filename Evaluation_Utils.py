@@ -21,8 +21,6 @@ import os
 from dotenv import load_dotenv
 
 from graph.Feature_Graph import Feature_Graph, ConnectionNode, ConnectionIndex, sae_hook_name, error_term_name, output_hook_name, input_hook_name, FeatureIndex, ErrorIndex, return_idx, FeatureErrorIndex
-from graph.Feature_Graph_Trans import *
-from graph.Feature_Graph_Cross import *
 from sae.autoencoder.SAE_Wrapper import HookedSAE
 from sae_lens import HookedSAETransformer, SAE as SAE_LENS
 from sae.autoencoder import SAE_Template
@@ -40,7 +38,7 @@ login(hf_key)
 def load_graph(
     model: HookedSAETransformer,
     dict_saes: Dict[int, List[Tuple[str, Any]]],
-    method_name: Literal["fc", "trans", "cross", "ml"],
+    method_name: Literal["fc"],
     use_error_term: bool,
 ) -> Feature_Graph:
     if method_name == "fc":
@@ -55,7 +53,7 @@ def load_graph(
 
 def load_saes_(
     model_name: str,
-    releases: List[str | Literal["local"]],
+    releases: List[str],
     sae_ids: List[str | Literal["hook_name"]],
     hook_pos: List[str],
     device: str | t.device = "cpu",
@@ -76,15 +74,6 @@ def load_saes_(
     dict_saes = {}
     list_saes = []
     
-    for release, sae_id in zip(releases, sae_ids):
-        if release == "local_multi":
-            saes = load_multi_sae_model(
-                sae_id,
-                model,
-                device=str(device),
-            )
-            list_saes += [sae.to(model.cfg.dtype) for sae in saes]
-        
     for layer in tqdm(layer_range):
         
         layer_saes = []
@@ -101,24 +90,6 @@ def load_saes_(
                 layer_saes.append((hooked_sae.cfg.hook_name, hooked_sae))
                 list_saes.append(hooked_sae)
                 
-            elif release == "local_multi":
-                target_sae = list_saes[0] # placeholder
-                for sae in list_saes:
-                    if hook_name == sae.cfg.hook_name:
-                        target_sae = sae
-                        break
-                    
-                # remove redundant saes with the same hook_name
-                has_hook = False
-                for hook, sae in layer_saes:
-                    if sae.cfg.hook_name == target_sae.cfg.hook_name:
-                        has_hook = True
-                        break
-                if has_hook:
-                    continue
-                    
-                layer_saes.append((hook_name, target_sae))
-                    
             else:
                 hooked_sae, _, _ = HookedSAE.from_pretrained(
                     release=release,
@@ -144,153 +115,22 @@ def load_saes(
     Dict[int, List[Tuple[str, HookedSAE]]],
     List[HookedSAE],
 ]:
-    if model_name == "meta-llama/Llama-3.1-8B":
-        releases = []
-        hook_pos = []
-        sae_ids = []
-        for sae_type in sae_types:
-            if sae_type == "post":
-                release = "llama_scope_lxr_8x"
-                pos = "resid_post"
-                sae_id = "l{layer}r_8x"
-                
-            elif sae_type == "attn":
-                release = "llama_scope_lxa_8x"
-                pos = "attn_out"
-                sae_id = "l{layer}a_8x"
-                
-            elif sae_type == "mlp":
-                release = "llama_scope_lxm_8x"
-                pos = "mlp_out"
-                sae_id = "l{layer}m_8x"
-                
-            else:
-                raise ValueError(f"Unknown SAE type: {sae_type}")
-            
-            releases.append(release)
-            hook_pos.append(pos)
-            sae_ids.append(sae_id)
-            
-    if model_name == "meta-llama/Llama-3.2-1B":
-        releases = []
-        hook_pos = []
-        sae_ids = []
-        for sae_type in sae_types:
-            if sae_type == "post":
-                release = "local"
-                pos = "resid_post"
-                sae_id = "data/checkpoints/topk_16.0_32_blocks.{layer}.hook_resid_post_meta-llama_Llama-3.2-1b_0.0001_1024_0.03125_42.ckpt"
-                
-            else:
-                raise ValueError(f"Unknown SAE type: {sae_type}")
-            
-            releases.append(release)
-            hook_pos.append(pos)
-            sae_ids.append(sae_id)
-            
-    elif model_name == "qwen3-1.7b":
-        releases = []
-        hook_pos = []
-        sae_ids = []
-        for sae_type in sae_types:
-            if sae_type == "post":
-                release = "local"
-                pos = "resid_post"
-                sae_id = ""
-                
-            elif sae_type == "mlp":
-                release = "local_multi"
-                pos = "mlp_out"
-                sae_id_1 = "data/checkpoints/topk_32.0_128_0_1_2_3_4_5_6_7_8_9_10_11_12_13_hook_mlp_out_qwen3-1.7b_0.0001_1024_0.03125_42.ckpt"
-                sae_id_2 = "data/checkpoints/topk_32.0_128_14_15_16_17_18_19_20_21_22_23_24_25_26_27_hook_mlp_out_qwen3-1.7b_0.0001_1024_0.03125_42.ckpt"
-                releases.extend([release, release])
-                hook_pos.extend([pos, pos])
-                sae_ids.extend([sae_id_1, sae_id_2])
-                continue
-            
-            else:
-                raise ValueError(f"Unknown SAE type: {sae_type}")
-            
-            releases.append(release)
-            hook_pos.append(pos)
-            sae_ids.append(sae_id)
-            
-    elif model_name == "gpt2-small":
-        releases = []
-        hook_pos = []
-        sae_ids = []
-        for sae_type in sae_types:
-            if sae_type == "ds":
-                # release = "gpt2-small-res-jb"
-                release = "local"
-                pos = "resid_pre"
-                # sae_id = "blocks.{layer}.hook_resid_pre"
-                # Our TopK SAEs (Appendix D.4). Override the location with GPT2_SAE_TEMPLATE.
-                sae_id = os.getenv("GPT2_SAE_TEMPLATE", "data/topk_custom_32.0_32_0.1_blocks.{layer}.hook_resid_pre_0.0001_256_0.03125_42.ckpt")
-                
-            elif sae_type == "mlp":
-                # release = "gpt2-small-mlp-out-v5-32k"
-                release = "gpt2-small-mlp-tm"
-                pos = "mlp_out"
-                sae_id = "blocks.{layer}.hook_mlp_out"
-                
-            elif sae_type == "trans_mlp":
-                release = "local"
-                pos = "mlp_out"
-                sae_id = "checkpoints/topk_transcoder_32.0_32_blocks.{layer}.hook_mlp_out_0.0001_256_0.03125_42.ckpt"
-                
-            else:
-                raise
-            
-            releases.append(release)
-            hook_pos.append(pos)
-            sae_ids.append(sae_id)
-            
-    elif model_name == "google/gemma-2-9b":
-        releases = []
-        hook_pos = []
-        sae_ids = []
-        for sae_type in sae_types:
-            if sae_type == "ds":
-                release = "gemma-scope-9b-pt-res-canonical"
-                pos = "resid_post"
-                sae_id = "layer_{layer}/width_16k/canonical"
-                
-            elif sae_type == "mlp":
-                release = "gemma-scope-9b-pt-mlp-canonical"
-                pos = "mlp_out"
-                sae_id = "layer_{layer}/width_16k/canonical"
-                
-            else:
-                raise
-            
-            releases.append(release)
-            hook_pos.append(pos)
-            sae_ids.append(sae_id)
-            
-    elif model_name == "google/gemma-2-2b":
-        releases = []
-        hook_pos = []
-        sae_ids = []
-        for sae_type in sae_types:
-            if sae_type == "ds":
-                release = "gemma-scope-2b-pt-res-canonical"
-                pos = "resid_post"
-                sae_id = "layer_{layer}/width_16k/canonical"
-                
-            elif sae_type == "mlp":
-                release = "gemma-scope-2b-pt-mlp-canonical"
-                pos = "mlp_out"
-                sae_id = "layer_{layer}/width_16k/canonical"
-                
-            else:
-                raise
-            
-            releases.append(release)
-            hook_pos.append(pos)
-            sae_ids.append(sae_id)
+    # GPT2: our TopK SAEs on the residual stream (Appendix D.4).
+    # Gemma-2-2B: Gemma Scope JumpReLU SAEs on the MLP outputs.
+    releases = []
+    hook_pos = []
+    sae_ids = []
+    if model_name == "gpt2-small" and sae_types == ["ds"]:
+        releases.append("local")
+        hook_pos.append("resid_pre")
+        # Override the checkpoint location with GPT2_SAE_TEMPLATE.
+        sae_ids.append(os.getenv("GPT2_SAE_TEMPLATE", "data/checkpoints/topk_32.0_32_blocks.{layer}.hook_resid_pre_gpt2-small_0.0001_256_0.03125_42.ckpt"))
+    elif model_name == "google/gemma-2-2b" and sae_types == ["mlp"]:
+        releases.append("gemma-scope-2b-pt-mlp-canonical")
+        hook_pos.append("mlp_out")
+        sae_ids.append("layer_{layer}/width_16k/canonical")
     else:
-        raise ValueError(f"Unknown model name: {model_name}")
+        raise ValueError(f"Unsupported model / SAE type: {model_name} {sae_types}")
     
     model, dict_saes, list_saes= load_saes_(
         model_name=model_name,
@@ -339,127 +179,6 @@ def active_nodes(
     
     return num_active, num_inactive
 
-
-def percen_active_nodes(graph: Feature_Graph, d_model: int) -> float:
-    num_active, num_inactive = active_nodes(graph)
-    return max(num_active, 1) * 100 / (num_active + num_inactive)
-
-
-def kl_div_from_logits(logits: t.Tensor, target: t.Tensor, reduction: str | None = "mean") -> t.Tensor:
-    """
-    Calculate the KL divergence between two distributions represented by logits.
-    
-    Args:
-        logits: The predicted logits
-        target: The target logits
-        reduction: How to reduce the result, either "mean", "sum", or None for no reduction
-        
-    Returns:
-        The KL divergence tensor
-    """
-    # Convert logits to probabilities using softmax
-    probs1 = t.nn.functional.softmax(target, dim=-1)
-    probs2 = t.nn.functional.softmax(logits[:, -1], dim=-1)
-    kl_div = probs1 * (t.log(probs1 + 1e-10) - t.log(probs2 + 1e-10))
-    kl_div = kl_div.sum(-1)
-    if reduction == "mean":
-        return kl_div.mean()
-    elif reduction == "sum":
-        return kl_div.sum()
-    return kl_div
-
-def revise_index(index: Index) -> Index:
-    if isinstance(index, FeatureIndex):
-        return FeatureIndex([index.list_index[-1]]) # type: ignore
-    elif isinstance(index, ErrorIndex):
-        return ErrorIndex([index.list_index[-1]]) # type: ignore
-    elif isinstance(index, FeatureErrorIndex):
-        return FeatureErrorIndex([index.list_index[-1]]) # type: ignore
-    else:
-        raise ValueError(f"Unknown index type: {type(index)}")
-
-def cache_activation_on_general_dataset(
-    graph: Feature_Graph,
-    dict_all_list: Dict[Tuple[Node, Index], List[Tuple[Node, Index, float]]],
-    tok_name: str,
-    num_batches: int,
-    batch_size: int,
-    device: str | t.device = "cpu",
-    max_length: int = 128,
-    data_path: str = "monology/pile-uncopyrighted",
-):
-    from sae.SAE_Trainer import DataConfig
-    from sae.Load_Data import load_data
-    
-    data_config = DataConfig(
-        data_path=data_path,
-        batch_size=1,
-        max_length=max_length,
-    )
-    
-    max_retries = 10
-    for attempt in range(max_retries):
-        try:
-            _, data_loader = load_data(tok_name, data_config)
-            break
-        except Exception as e:
-            pass
-        
-    data_toks = extract_data(data_loader, num_batches=num_batches) # type: ignore
-    
-    loader = get_loader(
-        data_toks,
-        batch_size=batch_size,
-    )
-    
-    def revise_dict_all_list(dict_all_list):
-        new_dict = {}
-        for (end_node, end_index), values in dict_all_list.items():
-            end_index = revise_index(end_index)
-            if (end_node, end_index) not in new_dict:
-                new_dict[(end_node, end_index)] = []
-            for (start_node, start_index, value) in values:
-                start_index = revise_index(start_index)
-                if (start_node, start_index) not in new_dict:
-                    new_dict[(start_node, start_index)] = []
-        return new_dict
-    
-    new_dict_all_list = revise_dict_all_list(dict_all_list)
-    
-    all_cache = {}
-    for batch in tqdm(loader):
-        batch = batch[0].to(device)
-        with t.no_grad():
-            _, cache = graph.run_model(batch, use_error_term=True)
-            
-            # for name, tens in cache.items():
-            #     if name not in all_cache:
-            #         all_cache[name] = []
-            #     all_cache[name].append(tens.detach().cpu())
-        
-        for node, index in new_dict_all_list.keys():
-            if isinstance(index, FeatureIndex):
-                if (node, index) not in all_cache:
-                    all_cache[(node, index)] = []
-                    
-                all_cache[(node, index)].append(
-                    cache[sae_hook_name(node.name)][:, :, index.list_index[-1]].flatten().detach().cpu()
-                )
-            elif isinstance(index, FeatureErrorIndex):
-                if (node, index) not in all_cache:
-                    all_cache[(node, index)] = []
-                    
-                all_cache[(node, index)].append(
-                    cache[sae_hook_name(error_term_name(node.name))][:, :, index.list_index[-1]].flatten().detach().cpu()
-                )
-    
-    for key in all_cache.keys():
-        all_cache[key] = t.cat(all_cache[key], dim=0)
-        
-    return all_cache
-
-def to_binary(x):
-    return (x > 0).int()
 
 T = TypeVar("T")
 K = TypeVar("K")

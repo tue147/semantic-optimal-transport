@@ -46,8 +46,6 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     ot_group = parser.add_argument_group("supernode clustering")
     ot_group.add_argument("--n_clusters", type=int, default=10, help="Supernodes per circuit.")
-    ot_group.add_argument("--alpha", type=float, default=0.8, help="OT clustering alpha.")
-    ot_group.add_argument("--lambda_pen", type=float, default=1.0, help="OT clustering penalty weight.")
     ot_group.add_argument("--n_intervals", type=int, default=5, help="Activation intervals sampled per feature.")
     ot_group.add_argument("--k_per_interval", type=int, default=5, help="Examples per interval.")
     ot_group.add_argument("--buffer", type=int, default=10, help="Context buffer around each example.")
@@ -150,8 +148,6 @@ def main(args: argparse.Namespace) -> None:
             graph_vis.build_graph_json(skip_edges=True)  # we don't need edge for this task
             graph_vis.run_clustering_ot_fast(
                 args.n_clusters,
-                alpha=args.alpha,
-                lambda_pen=args.lambda_pen,
                 n_intervals=args.n_intervals,
                 k_per_interval=args.k_per_interval,
                 buffer=args.buffer,

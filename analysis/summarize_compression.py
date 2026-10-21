@@ -1,8 +1,10 @@
 """Table 2 / Table 7: summarize circuit-compression results written by circuit_compress_eval.py.
 
-Merges every prompt slice of each cluster type, then reports the mean LLM-eval accuracy over
-gradable circuits with a 90% confidence interval (1.645 x standard error), plus a paired t-test
-against our method on the circuits both could grade. A circuit is gradable when the judge graded at
+Merges every prompt slice of each cluster type, then reports the LLM-eval accuracy two ways:
+macro = mean of the per-circuit accuracies over gradable circuits, with a 90% confidence interval
+(1.645 x standard error) -- the number in the tables -- and micro = pooled sum(correct) /
+sum(judged) over every circuit. Also a paired t-test of the macro scores against our method on
+the circuits both could grade. A circuit is gradable when the judge graded at
 least one feature, i.e. at least one supernode has >= 2 features (Appendix C.4).
 
 No model, no GPU, no API calls:
@@ -30,16 +32,18 @@ NAMES = {"ot_global_10": "Our", "feat_flow_llama": "FeatFlow", "mech_permute_lla
 
 
 def load_circuits(files):
-    """{global circuit index: (llm_eval, gradable)}."""
+    """{global circuit index: (llm_eval, gradable, n_correct, n_judged)}; the counts are None in
+    result files written before they were recorded."""
     rec = {}
     for f in files:
         start = int(re.search(r"_(\d+)_(\d+)_(?:seed\d+_)?results\.pt$", f).group(1))
         r = torch.load(f, weights_only=False)
         totals = r.get("llm_total") or [None] * len(r["llm_eval"])
-        for i, (v, n) in enumerate(zip(r["llm_eval"], totals)):
+        corrects = r.get("llm_correct") or [None] * len(r["llm_eval"])
+        for i, (v, n, c) in enumerate(zip(r["llm_eval"], totals, corrects)):
             v = float(v)
             ok = (n > 0) if n is not None else (not math.isnan(v) and v > 0)
-            rec[start + i] = (v if ok else 0.0, ok)
+            rec[start + i] = (v if ok else 0.0, ok, c, n)
     return rec
 
 
@@ -59,19 +63,25 @@ def main():
     ours = recs.get("ot_global_10", {})
 
     print(f"{args.node_threshold} nodes -> {args.n_clusters} supernodes, {args.results_dir}")
-    print(f"{'method':<12} {'gradable/n':>11} {'LLM eval (90% CI)':>22} {'p vs Our':>9}")
+    print(f"{'method':<12} {'gradable/n':>11} {'macro (90% CI)':>22} {'micro':>16} {'p vs Our':>9}")
     for ct, rec in recs.items():
         if not rec:
             print(f"{NAMES.get(ct, ct):<12} {'no files':>11}")
             continue
-        x = np.array([v for v, ok in rec.values() if ok])
+        x = np.array([v for v, ok, _, _ in rec.values() if ok])
         ci = 1.645 * x.std(ddof=1) / np.sqrt(len(x))
         pstr = "-"
         if ct != "ot_global_10" and ours:
             k = [i for i in rec if i in ours and rec[i][1] and ours[i][1]]
             if len(k) > 2:
                 pstr = f"{stats.ttest_rel([ours[i][0] for i in k], [rec[i][0] for i in k]).pvalue:.3f}"
-        print(f"{NAMES.get(ct, ct):<12} {f'{len(x)}/{len(rec)}':>11} {f'{x.mean():.4f} ± {ci:.4f}':>22} {pstr:>9}")
+        counts = [(c, n) for _, _, c, n in rec.values()]
+        if all(c is not None for c, _ in counts):
+            tc, tn = sum(c for c, _ in counts), sum(n for _, n in counts)
+            micro = f"{tc / tn:.4f} ({tc}/{tn})" if tn else "-"
+        else:
+            micro = "-"
+        print(f"{NAMES.get(ct, ct):<12} {f'{len(x)}/{len(rec)}':>11} {f'{x.mean():.4f} ± {ci:.4f}':>22} {micro:>16} {pstr:>9}")
 
 
 if __name__ == "__main__":

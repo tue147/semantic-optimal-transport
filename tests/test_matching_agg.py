@@ -2,7 +2,7 @@
 
 These back `feature_matching_test.py`'s `*_seedagg.json` details log: the run-file naming (which
 decides *which* files `--backfill` picks up) and the per-run metric extraction. The statistics
-themselves are `exp_config.summarize_stats`, covered by tests/test_seed_agg.py. The helpers live in
+themselves are `exp_config.summarize_stats`, covered at the bottom. The helpers live in
 exp_config so this test stays light -- importing feature_matching_test would pull in
 Evaluation_Utils and trigger the HuggingFace login. Run with the project conda env:
 
@@ -11,6 +11,7 @@ Evaluation_Utils and trigger the HuggingFace login. Run with the project conda e
     python tests/test_matching_agg.py
 """
 import argparse
+import math
 import os
 import sys
 
@@ -118,6 +119,48 @@ def test_format_table_drops_empty_columns_and_lists_seeds():
     table = ec.format_matching_table(methods)
     assert "LLM score" in table and "CE loss" not in table  # no skipping recorded -> no column
     assert "1:2.00/0.50" in table and "2:3.00/1.00" in table
+
+
+def _approx(a, b, tol=1e-9):
+    assert abs(a - b) <= tol, f"{a} != {b}"
+
+
+def test_summarize_empty():
+    s = ec.summarize_stats([])
+    assert s["n"] == 0
+    assert s["mean"] is None and s["ci90_low"] is None
+
+
+def test_summarize_single():
+    s = ec.summarize_stats([0.7])
+    assert s["n"] == 1
+    _approx(s["mean"], 0.7)
+    _approx(s["std"], 0.0)
+    _approx(s["sem"], 0.0)
+    # zero-width CI for a single sample
+    _approx(s["ci90_low"], 0.7)
+    _approx(s["ci90_high"], 0.7)
+    _approx(s["median"], 0.7)
+
+
+def test_summarize_matches_numpy_and_ci():
+    import numpy as np
+    vals = [0.2, 0.4, 0.6, 0.9]
+    s = ec.summarize_stats(vals)
+    arr = np.asarray(vals)
+    _approx(s["mean"], float(arr.mean()))
+    _approx(s["std"], float(arr.std(ddof=1)))
+    _approx(s["sem"], float(arr.std(ddof=1) / math.sqrt(len(vals))))
+    _approx(s["min"], 0.2)
+    _approx(s["max"], 0.9)
+    _approx(s["median"], float(np.median(arr)))
+    # CI is symmetric about the mean and non-degenerate for n>1
+    _approx((s["ci90_low"] + s["ci90_high"]) / 2, s["mean"])
+    assert s["ci90_high"] > s["mean"] > s["ci90_low"]
+    # matches t-based half width when scipy is present
+    from scipy import stats as st
+    half = float(st.t.ppf(0.95, len(vals) - 1)) * s["sem"]
+    _approx(s["ci90_high"] - s["mean"], half)
 
 
 if __name__ == "__main__":

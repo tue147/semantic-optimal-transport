@@ -116,26 +116,6 @@ def get_val_dataloader(
         collate_fn,
     )
     
-def get_test_dataloader(
-    path: str, 
-    model_name: str, 
-    max_length: int, 
-    batch_size: int, 
-    num_workers: int = 1,
-    collate_fn: Callable | None = collate_fn  # Function to apply transformations
-) -> DataLoader[tuple[torch.Tensor]]:
-    dataset = load_dataset(
-        path, data_files={"test": "test.jsonl.zst"}, split="test", streaming=True
-    )
-    return get_dataloader(
-        dataset, # type: ignore
-        model_name,
-        max_length,
-        batch_size,
-        num_workers,
-        collate_fn,
-    )
-
 def load_data(
     model_name: str, config: DataConfig, collate_fn: Callable | None = collate_fn,
 ) -> tuple[DataLoader, DataLoader]:

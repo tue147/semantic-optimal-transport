@@ -36,32 +36,11 @@ MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
         dtype="float16",
         layer_range=None,
     ),
-    "gemma_ds": dict(
-        model_name="google/gemma-2-2b",
-        tok_name="google/gemma-2-2b",
-        sae_type=["ds"],
-        dtype="float16",
-        layer_range=None,
-    ),
     "gpt2_ds": dict(
         model_name="gpt2-small",
         tok_name="gpt2",
         sae_type=["ds"],
         dtype="float16",
-        layer_range=None,
-    ),
-    "llama_post": dict(
-        model_name="meta-llama/Llama-3.2-1B",
-        tok_name="meta-llama/Llama-3.2-1B",
-        sae_type=["post"],
-        dtype="float16",
-        layer_range=[6, 7],
-    ),
-    "qwen_mlp": dict(
-        model_name="qwen3-1.7b",
-        tok_name="Qwen/Qwen3-1.7B",
-        sae_type=["mlp"],
-        dtype="bfloat16",
         layer_range=None,
     ),
 }
@@ -236,7 +215,7 @@ def resolve_judge(name: str, effort: str | None = None) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------------------------
-# Seed-aggregation statistics (circuit_compress_eval.py --aggregate_seeds)
+# Descriptive statistics (feature_matching_test.py, ot_topk_ablation.py)
 # ---------------------------------------------------------------------------------------------
 def summarize_stats(values: Sequence[float]) -> Dict[str, Any]:
     """Descriptive stats for a list of scalars: n, mean, sample std (ddof=1), sem, two-sided 90%
@@ -265,59 +244,6 @@ def summarize_stats(values: Sequence[float]) -> Dict[str, Any]:
         "n": n, "mean": mean, "std": std, "sem": sem,
         "ci90_low": mean - half, "ci90_high": mean + half,
         "min": float(arr.min()), "max": float(arr.max()), "median": float(np.median(arr)),
-    }
-
-
-def _get_seed_entry(per_seed: Dict[Any, Any], seed: Any) -> Any:
-    """Look up a seed in a per_seed dict tolerating int vs str keys (JSON stringifies int keys)."""
-    if seed in per_seed:
-        return per_seed[seed]
-    return per_seed.get(str(seed), per_seed.get(int(seed) if str(seed).lstrip("-").isdigit() else seed))
-
-
-def aggregate_seed_prompts(prompts: Sequence[Dict[str, Any]], seeds: Sequence[Any]) -> Dict[str, Any]:
-    """Compute the seed-aggregated statistics from a list of per-prompt records.
-
-    Each record is ``{"inter": float|None, "intra": float|None, "per_seed": {seed: {overall_accuracy,
-    total_correct, total_predictions, ...}}}``. Two accuracy views across seeds (seed = unit of
-    variation): ``micro`` pools every decision within a seed (sum correct / sum predictions across
-    prompts); ``macro`` averages the per-prompt overall accuracies within a seed. Each gets full
-    descriptive stats. inter/intra are clustering-only, aggregated across prompts.
-
-    This is the single source of truth for the stats, shared by circuit_compress_eval.py's
-    ``--aggregate_seeds`` writer and aggregate_seedagg.py's merger, so a merge of disjoint ranges
-    recomputes exactly what a single combined run would.
-    """
-    import numpy as np
-
-    per_seed_micro: Dict[Any, float] = {}
-    per_seed_macro: Dict[Any, float] = {}
-    for seed in seeds:
-        tc = tp = 0
-        overalls: List[float] = []
-        for prec in prompts:
-            ps = _get_seed_entry(prec.get("per_seed", {}), seed)
-            if ps is None:
-                continue
-            tc += int(ps["total_correct"])
-            tp += int(ps["total_predictions"])
-            if int(ps["total_predictions"]) > 0:  # ungradable prompts (nothing judged) don't count as 0
-                overalls.append(float(ps["overall_accuracy"]))
-        per_seed_micro[seed] = (tc / tp) if tp > 0 else 0.0
-        per_seed_macro[seed] = float(np.mean(overalls)) if overalls else 0.0
-
-    inter = [p["inter"] for p in prompts if p.get("inter") is not None]
-    intra = [p["intra"] for p in prompts if p.get("intra") is not None]
-
-    return {
-        "llm_accuracy": {
-            "micro_by_seed": per_seed_micro,
-            "micro_stats": summarize_stats([per_seed_micro[s] for s in seeds]),
-            "macro_by_seed": per_seed_macro,
-            "macro_stats": summarize_stats([per_seed_macro[s] for s in seeds]),
-        },
-        "inter_stats": summarize_stats(inter),
-        "intra_stats": summarize_stats(intra),
     }
 
 
@@ -461,26 +387,6 @@ def format_matching_table(methods: Dict[str, Dict[str, Any]]) -> str:
         )
         lines.append(f"  {name:<18} {vals}")
     return "\n".join(lines)
-
-
-def extract_decisions(cluster_details: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flatten the per-cluster LLM-eval output into one record per feature decision:
-    cluster_id, feature_index, predicted, ground_truth, correct. Reads the `predictions` /
-    `ground_truth` lists that `llm_clustering_eval` already produces -- it does not re-derive
-    anything, so the eval logic is untouched."""
-    decisions: List[Dict[str, Any]] = []
-    for cd in cluster_details:
-        preds = cd.get("predictions", []) or []
-        gts = cd.get("ground_truth", []) or []
-        for i, (p, g) in enumerate(zip(preds, gts)):
-            decisions.append({
-                "cluster_id": cd.get("cluster_id"),
-                "feature_index": i,
-                "predicted": bool(p),
-                "ground_truth": bool(g),
-                "correct": bool(p == g),
-            })
-    return decisions
 
 
 # ---------------------------------------------------------------------------------------------
@@ -817,24 +723,17 @@ def make_corrupt_and_index(model, clean_token: Tensor, device: t.device) -> Tupl
 # Clustering method table (circuit_compress_eval.py)
 # ---------------------------------------------------------------------------------------------
 # Maps a `cluster_type` string to the SAEGraphVisualizer method and the keyword arguments it was
-# called with. `n_clusters` is injected at call time. The OT variants are the alpha sweep.
+# called with. `n_clusters` is injected at call time. `ot_global_10` (the paper's "Our") keeps the
+# name of the result files it produced: `run_clustering_ot_global_concat_fast` at alpha=1, i.e. pure
+# OT distance with no circuit-topology term.
 
 CLUSTER_TYPE_SPECS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "naive": ("run_clustering", {}),
-    "ot": ("run_clustering_ot_fast", dict(alpha=0.8, lambda_pen=1.0)),
-    "ot_05": ("run_clustering_ot_fast", dict(alpha=0.5, lambda_pen=1.0)),
-    "ot_01": ("run_clustering_ot_fast", dict(alpha=0.1, lambda_pen=1.0)),
-    "ot_10": ("run_clustering_ot_fast", dict(alpha=1, lambda_pen=1.0)),
-    "ot_0": ("run_clustering_ot_fast", dict(alpha=0, lambda_pen=1.0)),
-    "ot_global": ("run_clustering_ot_global_concat_fast", dict(alpha=0.8, lambda_pen=1.0)),
-    "ot_global_05": ("run_clustering_ot_global_concat_fast", dict(alpha=0.5, lambda_pen=1.0)),
-    "ot_global_01": ("run_clustering_ot_global_concat_fast", dict(alpha=0.1, lambda_pen=1.0)),
-    "ot_global_10": ("run_clustering_ot_global_concat_fast", dict(alpha=1, lambda_pen=1.0)),
-    "ot_global_0": ("run_clustering_ot_global_concat_fast", dict(alpha=0, lambda_pen=1.0)),
+    "ot_global_10": ("run_clustering_ot_global_concat_fast", {}),
     "feat_flow_llama": ("run_clustering_decoder", dict(method="feature_flow")),
     "mech_permute_llama": ("run_clustering_decoder", dict(method="mech_permute")),
     "llm": ("run_clustering_llm", dict(n_intervals=3, k_per_interval=3)),
-    "causal": ("run_clustering_causal", dict(lambda_pen=0)),
+    "causal": ("run_clustering_causal", {}),
 }
 
 
@@ -866,10 +765,6 @@ def run_clustering_by_type(graph_vis, cluster_type: str, n_clusters: int) -> Non
 # disk" -- only `causal` is ever computed on the fly.
 
 LAYER_PAIR_PRESETS: Dict[Tuple[int, int], Dict[str, str | None]] = {
-    (1, 0): {
-        "ot": "ot_1_0_25_25_euclidean_500_0.1.pt",
-        "causal": None,
-    },
     (11, 0): {
         "ot": "ot_11_0_25_25_euclidean_500_0.1.pt",
         "feat_flow": "feat_flow_11_0_25_0.1.pt",

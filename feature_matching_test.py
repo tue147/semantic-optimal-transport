@@ -36,7 +36,6 @@ import einops
 from functools import partial
 from test_matching.util import *
 from test_matching.llm_eval import *
-from test_matching.patching import *
 from test_matching.layer_skipping import *
 from feature_matching.causal_matching import *
 

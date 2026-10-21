@@ -100,69 +100,6 @@ def parse_act_html(html_str, include_full_context=False):
                     
     return "\n".join(out)
 
-def format_graph_for_llm(graph_data, tokens: list[str], include_full_context: bool = False):
-    """
-    Converts either the raw graph or compressed graph JSON into a 
-    token-efficient text representation for the LLM API.
-    """
-    is_compressed = "nodes" in graph_data and any(n.get("type") == "super_node" for n in graph_data["nodes"])
-    
-    output = []
-    output.append(f"### The input tokens are: {tokens[:-1]}")
-    output.append(f"### Output token is: {tokens[-1]}")
-    output.append("### NODES (Features / Clusters of Features) ###")
-    
-    for node in graph_data.get("nodes", []):
-        if is_compressed:
-            output.append(f"\nCluster ID: {node['id']}")
-            output.append(f"Average Layer: {node.get('layer', 'N/A'):.2f} | Average Seq Pos: {node.get('seq', 'N/A'):.2f}")
-            output.append(f"Total Causality Score: {node.get('score', 0):.4f}")
-            
-            output.append("  Contains Features:")
-            for feat in node.get("features", []):
-                act_text = parse_act_html(feat.get("act_html", ""), include_full_context)
-                logit_text = parse_logits_html(feat.get("logits_html", ""))
-                output.append(f"  - Feature: {feat['id']} | Layer: {feat.get('layer')} | Seq: {feat.get('seq')} - Align with tokens: {feat.get('seq_str')}")
-                output.append(f"    Causality Score: {feat.get('score', 0):.4f}")
-                output.append(f"    Act Context:\n{act_text}")
-                output.append(f"    Logits (Promotes/Suppresses):\n      {logit_text}")
-        else:
-            if node.get("type") == "error": continue 
-            
-            act_text = parse_act_html(node.get("act_html", ""), include_full_context)
-            logit_text = parse_logits_html(node.get("logits_html", ""))
-            
-            output.append(f"\nFeature ID: {node['id']} | Layer: {node.get('layer')} | Seq: {node.get('seq')} - Align with tokens: {node.get('seq_str')}")
-            output.append(f"Causality Score: {node.get('score', 0):.4f}")
-            output.append(f"Act Context:\n{act_text}")
-            output.append(f"Logits (Promotes/Suppresses):\n  {logit_text}")
-
-    output.append("\n### EDGES (Causal Connections) ###")
-    output.append("Note: Higher connection weight/value indicates stronger causal importance.")
-    
-    # Req #5: Remove the edge that has connection to the error node
-    filtered_links = [
-        link for link in graph_data.get("links", [])
-        if "::err" not in str(link.get('source', '')) and "::err" not in str(link.get('target', ''))
-    ]
-    
-    # # Req #3: Sort edges in descending order of causal importance (using absolute value)
-    # sorted_links = sorted(filtered_links, key=lambda x: abs(x.get('value', 0)), reverse=True)
-    
-    for link in filtered_links:
-        src = link['source']
-        tgt = link['target']
-        val = link['value']
-        
-        if is_compressed:
-            count = link.get('count', 1)
-            output.append(f"Cluster {src} -> Cluster {tgt} | Weight: {val:.4f} (from {count} sub-connections)")
-        else:
-            output.append(f"Feature {src} -> Feature {tgt} | Weight: {val:.4f}")
-
-    return "\n".join(output)
-
-
 prompt = '''
 You are an expert AI interpretability researcher analyzing the internal computational graph of a transformer language model. 
 
@@ -218,16 +155,6 @@ IMPORTANT NOTE:
 - In step 3 and 4, do NOT show any clue about you are interpreting using cluster of feature or individual feature (do not say "cluster (id) / feature (id) shows that ...", instead "the model recognizes that ...")
 - Logit information can be a good source to interpret features, if the top / bottom tokens represent similar meaning.
 '''
-
-def get_message(clean_llm_input: str) -> Messages:
-    SYSTEM_PROMPT = prompt
-    USER_PROMPT = f"GRAPH DATA:\n{clean_llm_input}"
-    
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": USER_PROMPT},
-    ]
-    
 
 '''
 LLM circuit clustering

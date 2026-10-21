@@ -48,7 +48,7 @@ class Pruner:
         clean_tokens: Tensor,
         corrupt_tokens_or_cache: Tensor | Dict[str, Tensor] | ActivationCache | None,
         threshold: float,
-        prune_type: str = "patch",
+        prune_type: str = "attrib",
         cut_mode: str = "node",
         scoring_mode: str = "abs",
         threshold_type: str = "value",
@@ -64,7 +64,7 @@ class Pruner:
         clean_tokens: Tensor,
         corrupt_tokens_or_cache: Tensor | Dict[str, Tensor] | ActivationCache | None,
         threshold: float,
-        prune_type: str = "patch",
+        prune_type: str = "attrib",
         cut_mode: str = "node",
         scoring_mode: str = "abs",
         threshold_type: str = "value",
@@ -79,7 +79,7 @@ class Pruner:
             clean_tokens: Tensor, the clean tokens for the model.
             corrupt_tokens_or_cache: Tensor | Dict[str, Tensor] | ActivationCache, the corrupt tokens or corrupt cache for the model.
             threshold: float, the threshold for pruning.
-            prune_type: str, the type for pruning, either "patch" or "attrib" or "ig".
+            prune_type: str, the type for pruning; only "attrib" (attribution patching) is implemented.
             cut_mode: str, the mode for pruning, either "node" or "edge".
             scoring_mode: str, the mode for scoring, either "abs" or "greater" or "less". 
                 E.g. if scoring_mode is "greater" and threshold_type is "value, then the nodes/edges with metric greater than the baseline by a threshold will be pruned.
@@ -101,85 +101,11 @@ class Pruner:
             assert len(clean_tokens) == len(corrupt_tokens_or_cache) or len(corrupt_tokens_or_cache) == 1, "clean_tokens and corrupt_tokens must have the same length, or corrupt_tokens must have length 1."
         assert return_type in ["retained", "all", "None", None], f"return_type must be either 'retained' or 'all' or 'None', got {return_type}"
         
-        if prune_type == "patch":
-            assert threshold_type == "value", "Patching only support value threshold type."
-            assert self.graph.graph_type() != "feature graph", "Patching is not supported for feature graphs."
-            return self._prune_patching(clean_tokens, corrupt_tokens_or_cache, threshold, cut_mode, scoring_mode, modify_inplace, return_type, reverse_pruning, **kwargs)
-        elif prune_type == "attrib":
+        if prune_type == "attrib":
             return self._prune_attributing(clean_tokens, corrupt_tokens_or_cache, threshold, cut_mode, "attrib", scoring_mode, threshold_type, modify_inplace, return_type, reverse_pruning, **kwargs)
         else:
             raise ValueError(f"Prune type {prune_type} is not implemented.")
          
-    def _prune_patching(
-        self,
-        clean_tokens: Tensor,
-        corrupt_tokens_or_cache: Tensor | Dict[str, Tensor] | ActivationCache | None,
-        threshold: float,
-        cut_mode: str = "node",
-        scoring_mode: str = "abs",
-        modify_inplace: bool = False,
-        return_type: str | None = "retained",
-        reverse_pruning: bool = False,
-        **kwargs
-    ) -> Union[Graph, Tuple[Graph, Dict]]:
-        
-        if modify_inplace:
-            graph = self.graph
-        else:
-            graph = deepcopy(self.graph)
-        
-        add_handler, update_handler, delete_handler, iterate_handler, find_deleted_handler = self._get_handler(graph, cut_mode)
-        clean_tokens = clean_tokens.to(self.device)
-        
-        initial_deleted_comps = set(find_deleted_handler())
-        
-        graph.model_setup() # set up the model before caching
-        with t.no_grad(): # no gradient needed, save memory
-            if isinstance(corrupt_tokens_or_cache, Tensor):
-                _, corrupt_cache = graph.run_model(corrupt_tokens_or_cache.to(self.device))
-            else:
-                corrupt_cache = corrupt_tokens_or_cache
-            clean_logits, _ = graph(clean_tokens, corrupt_cache) # not run with cache
-            current_score = self.metric(clean_logits)
-            if self.verbose:
-                print(f"Current score: {current_score}")
-                
-            retained_components = {}
-            all_components = {}
-            for component in tqdm(reversed(iterate_handler()), disable=not self.verbose):
-                if self.effects.get(component, None) is None:
-                    delete_handler(*component)
-                    
-                    patch_logits, _ = graph(clean_tokens, corrupt_cache, patch_deleted_comp=True)
-                    temp_score = self.metric(patch_logits)
-                    self.effects[component] = temp_score
-                else:
-                    temp_score = self.effects[component]
-                
-                retain, value = self._value_threshold(
-                    current_score, temp_score, threshold, scoring_mode, reverse_pruning
-                )
-                        
-                all_components[component] = value
-                if retain:
-                    if component not in initial_deleted_comps: # avoid adding initial deleted components
-                        add_handler(*component)
-                    update_handler(*(component + (value,)))
-                    retained_components[component] = value
-                else:
-                    current_score = temp_score
-                    if cut_mode == "node":
-                        update_handler(*(component + (value,)))
-                    if self.verbose:
-                        print(f"Pruned {component} with value {value}")
-                        print(f"Current score: {current_score}")
-                    
-        if return_type == "retained":
-            return graph, retained_components
-        elif return_type == "all":
-            return graph, all_components
-        return graph
-    
     def _prune_attributing(
         self,
         clean_tokens: Tensor,

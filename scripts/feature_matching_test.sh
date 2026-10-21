@@ -27,7 +27,7 @@ source "$_COMMON"
 mkdir -p logs
 
 # ---- model / SAE -----------------------------------------------------------------------------
-# Presets: gemma_mlp | gemma_ds | gpt2_ds | llama_post | qwen_mlp
+# Presets: gemma_mlp | gpt2_ds
 PRESET="${PRESET:-gemma_mlp}"
 
 # ---- token extraction ------------------------------------------------------------------------

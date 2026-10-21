@@ -112,7 +112,7 @@ def main(args: argparse.Namespace) -> None:
         important_output_tokens=top_tokens_and_pos(model(clean_token)),
     )
     graph_vis.run_clustering_ot_global_concat_fast(
-        n_clusters, alpha=1, lambda_pen=1.0, n_intervals=5, k_per_interval=5, buffer=10,
+        n_clusters, n_intervals=5, k_per_interval=5, buffer=10,
         max_points_per_feature=args.max_points_per_feature,
     )
 

@@ -22,7 +22,7 @@ source "$_COMMON"
 mkdir -p logs
 
 # ---- model / SAE -----------------------------------------------------------------------------
-# Presets: gemma_mlp | gemma_ds | gpt2_ds | llama_post | qwen_mlp
+# Presets: gemma_mlp | gpt2_ds
 PRESET="gemma_mlp"
 
 # ---- activation cache ------------------------------------------------------------------------
@@ -63,8 +63,6 @@ DIRECT_EFFECT=false
 
 # ---- supernode clustering --------------------------------------------------------------------
 N_CLUSTERS=10
-ALPHA=0.8
-LAMBDA_PEN=1.0
 N_INTERVALS=5
 K_PER_INTERVAL=5
 BUFFER=10
@@ -100,8 +98,6 @@ python modular_feature_group.py \
     --node_threshold "$NODE_THRESHOLD" \
     --direct_effect "$DIRECT_EFFECT" \
     --n_clusters "$N_CLUSTERS" \
-    --alpha "$ALPHA" \
-    --lambda_pen "$LAMBDA_PEN" \
     --n_intervals "$N_INTERVALS" \
     --k_per_interval "$K_PER_INTERVAL" \
     --buffer "$BUFFER" \

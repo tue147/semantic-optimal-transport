@@ -197,16 +197,6 @@ class TrainSAEConfig:
         )
         """The name of the saved model file."""
         
-class SaveAutoencodersCallback(pl.Callback):
-    def __init__(self, save_dir):
-        self.save_dir = save_dir
-
-    def on_train_end(self, trainer, pl_module):
-        pl_module.save_autoencoders(self.save_dir) # type: ignore
-
-    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
-        pl_module.save_autoencoders(self.save_dir) # type: ignore
-
 def train(
     config: TrainSAEConfig, 
     data_cfg: DataConfig,
@@ -221,28 +211,6 @@ def train(
 
     if train_mode == "sae":
         customMLSAE= CustomSAE(
-            config.sae_name,
-            config.hook_names,
-            model,
-            config.expansion_factor,
-            config.d_sae,
-            config.k,
-            config.mse_coef,
-            config.auxk,
-            config.auxk_coef,
-            config.sparsity_coef,
-            config.dead_tokens_threshold,
-            config.dead_threshold,
-            config.lr,
-            config.standardize,
-            data_cfg.max_length,
-            data_cfg.batch_size,
-            config.use_loss_var,
-            config.accumulate_grad_batches,
-            **kwargs,
-        )
-    elif train_mode == "multisae":
-        customMLSAE= CustomMultiSAE(
             config.sae_name,
             config.hook_names,
             model,

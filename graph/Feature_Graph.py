@@ -23,7 +23,6 @@ from .Graph_utils import nested_dict_to_string
 from .Sparse_act import SparseAct
 from torch import sparse_coo_tensor
 import einops
-from .ig_utils import *
 
 def cache_to_sparseact(
     cache: Dict[str, Tensor] | ActivationCache, 
@@ -36,15 +35,6 @@ def cache_to_sparseact(
         res=cache[res_name] if res_name is not None else None,
         resc=cache[resc_name] if resc_name is not None else None,
     )
-    
-def interpolate(start: Tensor, end: Tensor, frac: float,) -> Tensor:
-    assert 0 <= frac <= 1, "frac must be in [0, 1]"
-    return start * frac + end * (1 - frac)
-
-def create_list(dict: Dict[str, Tensor], name: str) -> Dict[str, Tensor]:
-    if name not in dict:
-        dict[name] = 0 # type: ignore
-    return dict
     
 class ConnectionNode(Node):
     def __init__(self, name: str):
@@ -150,9 +140,6 @@ def input_hook_name(sae_name: str) -> str:
 
 def recons_hook_name(sae_name: str) -> str:
     return f'{sae_name}.hook_sae_recons'
-
-def revert_hook_name(sae_name: str) -> str:
-    return ".".join(sae_name.split(".")[:-1]) # e.g. ...hook_resid_pre.hook_sae_acts_post -> ...hook_resid_pre
 
 def return_idx(idx: Tuple | List, length: int = 2) -> Tuple:
     assert len(idx) <= length, "The length of idx must be less than or equal to length"
@@ -294,18 +281,6 @@ class Feature_Graph(Graph):
         self._check_graph()
         return nested_dict_to_string(self.connection, indent=4)
     
-    def _check_feat_idx(self, feat_idx: Tuple | List) -> None:
-        if self.token_wise:
-            assert len(feat_idx) == 2, "Please provide the correct index"
-        else:
-            assert len(feat_idx) == 1, "Please provide the correct index"
-            
-    def _check_error_idx(self, error_idx: Tuple | List) -> None:
-        if self.token_wise:
-            assert len(error_idx) == 1, "Please provide the correct index"
-        else:
-            assert len(error_idx) == 0, "Please provide the correct index"
-        
     def _active_nodes(
         self,
         sae_name: Node,
@@ -506,105 +481,6 @@ class Feature_Graph(Graph):
                 all_edges.append(start + end)
         return all_edges
     
-    def add_single_feature(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        feat_idx: Tuple[int, ...] | List[int] | FeatureIndex,
-    ) -> None:
-        self._check_graph()
-        self._set_feat_value(sae_name, node_idx, feat_idx, 1)
-        
-    def delete_single_feature(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        feat_idx: Tuple[int, ...] | List[int] | FeatureIndex,
-    ) -> None:
-        self._check_graph()
-        self._set_feat_value(sae_name, node_idx, feat_idx, 0)
-        
-    def update_single_feature(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        feat_idx: Tuple[int, ...] | List[int] | FeatureIndex,
-        value: int | float | Tensor,
-    ) -> None:
-        self._check_graph()
-        assert isinstance(value, (int, float, Tensor)), "The value must be int, float or Tensor."
-        self._set_feat_value(sae_name, node_idx, feat_idx, value)
-        
-    def add_single_error(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        error_idx: Tuple[int, ...] | List[int] | ErrorIndex,
-    ) -> None:
-        self._check_graph()
-        self._set_error_value(sae_name, node_idx, error_idx, 1)
-        
-    def delete_single_error(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        error_idx: Tuple[int, ...] | List[int] | ErrorIndex,
-    ) -> None:
-        self._check_graph()
-        self._set_error_value(sae_name, node_idx, error_idx, 0)
-        
-    def update_single_error(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        error_idx: Tuple[int, ...] | List[int] | ErrorIndex,
-        value: int | float | Tensor, 
-    ) -> None:
-        self._check_graph()
-        assert isinstance(value, (int, float, Tensor)), "The value must be int, float or Tensor."
-        self._set_error_value(sae_name, node_idx, error_idx, value)
-        
-    def _set_feat_value(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        feat_idx: Tuple[int, ...] | List[int] | FeatureIndex,
-        value: int | float | Tensor,
-    ) -> None:
-        self._check_graph()
-        
-        if isinstance(feat_idx, (tuple, list)):
-            self._check_feat_idx(feat_idx)
-            self.nodes[(sae_name, node_idx)].act[return_idx(feat_idx)] = value
-        elif isinstance(feat_idx, FeatureIndex):
-            self.nodes[(sae_name, node_idx)].act[feat_idx.as_index] = value
-        else:
-            raise ValueError(f"feat_idx of type {type(feat_idx)} is not supported.")
-        
-    def _set_error_value(
-        self,
-        sae_name: Node,
-        node_idx: Index,
-        error_idx: Tuple[int, ...] | List[int] | ErrorIndex,
-        value: int | float | Tensor, 
-    ) -> None:
-        if not self.use_error_term:  # nothing to delete
-            return
-        
-        if isinstance(error_idx, (tuple, list)):
-            self._check_error_idx(error_idx)
-            self.nodes[(sae_name, node_idx)].resc[return_idx(error_idx, 1)] = value # type: ignore
-        elif isinstance(error_idx, ErrorIndex):
-            self.nodes[(sae_name, node_idx)].resc[error_idx.as_index] = value # type: ignore
-        else:
-            raise ValueError(f"error_idx of type {type(error_idx)} is not supported.")
-        
-    def remove_error_term(self) -> None:
-        if self.use_error_term:
-            for sae_name, node_idx in self.nodes.keys():
-                if self.nodes[(sae_name, node_idx)].resc is not None:
-                    self.nodes[(sae_name, node_idx)].resc = t.zeros(self.seq_length, requires_grad=False).to(self.device) # type: ignore
-    
     def forward(
         self,
         clean_token: Tensor,
@@ -633,38 +509,6 @@ class Feature_Graph(Graph):
     
         return logits, cache
     
-    def intervene_components(
-        self,
-        clean_token: Tensor,
-        corrupt_cache: Dict[str, Tensor],
-        metric: Callable[[Tensor], Tensor],
-        forward_only: bool = False,
-        retain_graph: bool = False,
-        pass_through_grad: bool = False,
-        verbose: bool = False,
-        **kwargs,
-    ) -> Dict[str, Tensor]:
-        self._check_graph()
-        self.model_setup()
-
-        bwd_cache = {}
-        
-        with t.set_grad_enabled(True):
-            with self._detach_error_term(True):
-                with self._setup_forward_model_hook():
-                    with self._setup_intervene_grad_sae_hook(
-                        bwd_cache=bwd_cache, 
-                        corrupt_cache=corrupt_cache,
-                        pass_through_grad=pass_through_grad,
-                    ):
-                        res = metric(self.model(clean_token))
-                        if not forward_only:
-                            res.backward(retain_graph=retain_graph)
-            
-        self.model_setup()
-           
-        return bwd_cache | {"metric": res}
-    
     def __call__(self, *args, **kwargs) -> Tuple[Tensor, Dict[str, SparseAct]]:
         return self.forward(*args, **kwargs)
     
@@ -691,22 +535,6 @@ class Feature_Graph(Graph):
                 node_grads, clean_cache = self._gradient_wrt_nodes(
                     clean_token, metric, retain_graph, pass_through_grad, **kwargs
                 )
-            elif gradient_mode == "graddrop":
-                node_grads, clean_cache = self._gradient_wrt_nodes_graddrop(
-                    clean_token, metric, pass_through_grad, **kwargs
-                )
-            elif gradient_mode in ["ig", "ig2", "idg"]:
-                if corrupt_cache is None:
-                    raise
-                node_grads, clean_cache = self._gradient_wrt_nodes_ig(
-                    clean_token, corrupt_cache, metric, gradient_mode, retain_graph, verbose, **kwargs
-                )
-            elif gradient_mode in ["ig_input", "ig2_input", "idg_input"]:
-                if corrupt_cache is None:
-                    raise
-                node_grads, clean_cache = self._gradient_wrt_nodes_ig_input(
-                    clean_token, corrupt_cache, metric, gradient_mode, retain_graph, verbose, **kwargs
-                )
             else:
                 raise NotImplementedError(f"gradient_mode {gradient_mode} is not supported")
             node_effect = self._attrib_effect_node(node_grads, corrupt_cache, clean_cache)
@@ -725,22 +553,6 @@ class Feature_Graph(Graph):
                 if gradient_mode == "standard":
                     node_grads, clean_cache = self._gradient_wrt_nodes(
                         clean_token, metric, retain_graph, pass_through_grad, **kwargs
-                    )
-                elif gradient_mode == "graddrop":
-                    node_grads, clean_cache = self._gradient_wrt_nodes_graddrop(
-                        clean_token, metric, pass_through_grad, **kwargs
-                    )
-                elif gradient_mode in ["ig", "ig2", "idg"]:
-                    if corrupt_cache is None:
-                        raise
-                    node_grads, clean_cache = self._gradient_wrt_nodes_ig(
-                        clean_token, corrupt_cache, metric, gradient_mode, retain_graph, verbose, **kwargs
-                    )
-                elif gradient_mode in ["ig_input", "ig2_input", "idg_input"]:
-                    if corrupt_cache is None:
-                        raise
-                    node_grads, clean_cache = self._gradient_wrt_nodes_ig_input(
-                        clean_token, corrupt_cache, metric, gradient_mode, retain_graph, verbose, **kwargs
                     )
                 else:
                     raise NotImplementedError(f"gradient_mode {gradient_mode} is not supported")
@@ -861,198 +673,6 @@ class Feature_Graph(Graph):
              
         return node_grads, cache
     
-    def _gradient_wrt_nodes_graddrop(
-        self,
-        clean_token: Tensor,
-        metric: Callable[[Tensor], Tensor],
-        pass_through_grad: bool = False,
-        verbose: bool = False,
-        **kwargs,
-    ) -> Tuple[
-        Dict[Tuple[Node, Index], SparseAct],  # node effects
-        Dict[str, SparseAct]
-    ]:
-        '''
-        Forward pass of the graph with clean tokens, if the edge exists, replace the activation with corrupted activation
-        Backward pass on the graph wrt the metric
-        Return the gradients wrt nodes, edges, and activation cache
-        '''
-        self._check_graph()
-        self.model_setup()
-
-        bwd_cache = {}
-        fwd_cache = {}
-        graddrop_layers = [-1]
-        with t.set_grad_enabled(True):
-            with self._detach_error_term(True):
-                with self._setup_forward_model_hook():
-                    with self._setup_fwd_bwd_graddrop_sae_hook(
-                        fwd_cache=fwd_cache, 
-                        bwd_cache=bwd_cache, 
-                        graddrop_layers=graddrop_layers,
-                        pass_through_grad=pass_through_grad,
-                    ):
-                        out = metric(self.model(clean_token))
-                        
-                        for layer in range(self.model.cfg.n_layers):
-                            graddrop_layers[0] = layer
-                            out.backward(retain_graph=True)
-                                
-        # average the gradients                 
-        for key in bwd_cache.keys():
-            bwd_cache[key] /= (self.model.cfg.n_layers - 1)
-                
-        node_grads = self._aggregate_bwd_cache(bwd_cache)
-        cache = self._aggregate_fwd_cache(fwd_cache)
-            
-        self.model_setup()
-            
-        return node_grads, cache
-    
-    def _gradient_wrt_nodes_ig(
-        self,
-        clean_token: Tensor,
-        corrupt_cache: ActivationCache | Dict[str, Tensor],
-        metric: Callable[[Tensor], Tensor],
-        mode: str,
-        retain_graph: bool = False,
-        verbose: bool = False,
-        **kwargs,
-    ) -> Tuple[
-        Dict[Tuple[Node, Index], SparseAct],  # node effects
-        Dict[str, SparseAct]
-    ]:
-        steps = kwargs.get('steps', 10)
-        
-        self._check_graph()
-        self.model_setup()
-
-        _, fwd_cache = self.run_model(clean_token)
-        bwd_cache: Dict[str, Tensor] = {}
-        with t.set_grad_enabled(True):
-            with self._detach_error_term(True):
-                for target_name in self.dict_saes.keys():
-                    for (sae_act, sae_scale), (error_act, error_scale) in IGPathSelector(
-                        ig_name=mode, 
-                        target_names=[
-                            sae_hook_name(target_name), 
-                            error_term_name(target_name) if self.use_error_term else None,
-                        ],
-                        clean_cache=fwd_cache,
-                        corrupt_cache=corrupt_cache,
-                        clean_token=clean_token,
-                        fwd_func=partial(
-                            self.intervene_components, 
-                            forward_only=True, 
-                            retain_graph=False, 
-                            verbose=False, 
-                            pass_through_grad=True,
-                        ),
-                        grad_func=partial(
-                            self.intervene_components, 
-                            forward_only=False, 
-                            retain_graph=False, 
-                            verbose=False, 
-                            pass_through_grad=True,
-                        ),
-                        metric=metric,
-                        n_steps=steps,
-                        **kwargs
-                    ):
-                        with self._setup_forward_model_hook():
-                            with self._setup_fwd_bwd_grad_sae_hook_ig( 
-                                target_name=target_name,
-                                sae_act=sae_act, # type: ignore
-                                error_act=error_act,
-                                sae_scale=sae_scale, # type: ignore
-                                error_scale=error_scale,
-                                bwd_cache=bwd_cache,
-                            ):
-                                metric(self.model(clean_token)).backward(retain_graph=retain_graph)
-               
-        # average the gradients                 
-        for key in bwd_cache.keys():
-            bwd_cache[key] /= steps
-                
-        node_grads = self._aggregate_bwd_cache(bwd_cache)
-        cache = self._aggregate_fwd_cache(fwd_cache)
-            
-        self.model_setup()
-              
-        return node_grads, cache
-    
-    def _gradient_wrt_nodes_ig_input(
-        self,
-        clean_token: Tensor,
-        corrupt_cache: ActivationCache | Dict[str, Tensor],
-        metric: Callable[[Tensor], Tensor],
-        mode: str,
-        retain_graph: bool = False,
-        verbose: bool = False,
-        **kwargs,
-    ) -> Tuple[
-        Dict[Tuple[Node, Index], SparseAct],  # node effects
-        Dict[str, SparseAct]
-    ]:
-        steps = kwargs.get('steps', 10)
-        
-        self._check_graph()
-        self.model_setup()
-
-        corrupt_token = kwargs.get("corrupt_token", None)
-        if corrupt_token is None:
-            raise 
-        embed_clean_cache = {utils.get_act_name("embed"): self.model.embed(clean_token).detach()}
-        embed_corrupt_cache = {utils.get_act_name("embed"): self.model.embed(corrupt_token).detach()}
-
-        _, fwd_cache = self.run_model(clean_token)
-        bwd_cache: Dict[str, Tensor] = {}
-        with t.set_grad_enabled(True):
-            with self._detach_error_term(True):
-                for path in IGPathSelector(
-                    ig_name=mode, 
-                    target_names=[utils.get_act_name("embed")],
-                    clean_cache=embed_clean_cache,
-                    corrupt_cache=embed_corrupt_cache,
-                    clean_token=clean_token,
-                    fwd_func=partial(
-                        self.intervene_components, 
-                        forward_only=True, 
-                        retain_graph=False, 
-                        verbose=False, 
-                        pass_through_grad=True,
-                    ),
-                    grad_func=partial(
-                        self.intervene_components, 
-                        forward_only=False, 
-                        retain_graph=False, 
-                        verbose=False, 
-                        pass_through_grad=True,
-                    ),
-                    metric=metric,
-                    n_steps=steps,
-                    **kwargs
-                ):
-                    act, scale = path[0]
-                    with self._setup_forward_model_hook():
-                        with self._setup_fwd_bwd_grad_sae_hook_ig_input( 
-                            input_act=act, # type: ignore
-                            scale=scale, # type: ignore
-                            bwd_cache=bwd_cache,
-                        ):
-                            metric(self.model(clean_token)).backward(retain_graph=retain_graph)
-               
-        # average the gradients                 
-        for key in bwd_cache.keys():
-            bwd_cache[key] /= steps
-                
-        node_grads = self._aggregate_bwd_cache(bwd_cache)
-        cache = self._aggregate_fwd_cache(fwd_cache)
-            
-        self.model_setup()
-             
-        return node_grads, cache
-        
     def _gradient_wrt_edges(
         self,
         clean_token: Tensor,
@@ -1262,167 +882,6 @@ class Feature_Graph(Graph):
         return [sae for _, sae in self.dict_saes.items()]
 
     @contextmanager
-    def _setup_fwd_bwd_grad_sae_hook_ig(
-        self, 
-        target_name: str,
-        sae_act: Tensor,
-        error_act: Tensor | None,
-        sae_scale: Tensor,
-        error_scale: Tensor | None,
-        bwd_cache: Dict[str, Tensor],
-    ):  
-        def hook_sae_bwd(grad: Tensor, hook: HookPoint, sae_name: str) -> None:
-            if hook.name == sae_hook_name(sae_name):
-                create_list(bwd_cache, sae_hook_name(sae_name))
-                bwd_cache[sae_hook_name(sae_name)] += grad.detach() * sae_scale
-                
-            elif hook.name == output_hook_name(sae_name):
-                if self.use_error_term:
-                    # we have: output = recon + stop_grad(error_term)
-                    # so, the TRUE error_grad (if not stop_grad) is output_grad 
-                    # due to: output = recon + error_term
-                    create_list(bwd_cache, error_term_name(sae_name))
-                    bwd_cache[error_term_name(sae_name)] += grad.detach() * error_scale # type: ignore
-                    
-        def hook_sae_fwd(act: Tensor, hook: HookPoint, sae_name: str) -> Tensor:
-            modified_act = act.clone()
-            if hook.name == sae_hook_name(sae_name):
-                # interpolate for integrated gradients
-                modified_act.copy_(sae_act)
-                
-            elif error_term_name(sae_name) == hook.name and self.use_error_term:
-                # interpolate for integrated gradients
-                modified_act.copy_(error_act) # type: ignore
-                    
-            return modified_act
-        
-        try:
-            with self._setup_error_term(self.use_error_term):
-                for sae_name, sae in self.dict_saes.items():
-                    if sae_name != target_name: # only hook the target SAE
-                        continue
-                    sae.add_hook(
-                        lambda name: True,
-                        partial(hook_sae_fwd, sae_name=sae_name),
-                        dir="fwd",
-                    )
-                    sae.add_hook(
-                        lambda name: True,
-                        partial(hook_sae_bwd, sae_name=sae_name),
-                        dir="bwd",
-                    )
-                yield
-        finally:
-            for sae in self.dict_saes.values():
-                sae.reset_hooks()
-                
-    @contextmanager
-    def _setup_fwd_bwd_grad_sae_hook_ig_input(
-        self, 
-        input_act: Tensor,
-        scale: Tensor,
-        bwd_cache: Dict[str, Tensor],
-    ):  
-        def hook_sae_bwd(grad: Tensor, hook: HookPoint, sae_name: str) -> None:
-            if hook.name == sae_hook_name(sae_name):
-                create_list(bwd_cache, sae_hook_name(sae_name))
-                bwd_cache[sae_hook_name(sae_name)] += grad.detach() * scale
-                
-            elif hook.name == output_hook_name(sae_name):
-                if self.use_error_term:
-                    # we have: output = recon + stop_grad(error_term)
-                    # so, the TRUE error_grad (if not stop_grad) is output_grad 
-                    # due to: output = recon + error_term
-                    create_list(bwd_cache, error_term_name(sae_name))
-                    bwd_cache[error_term_name(sae_name)] += grad.detach() * scale
-                    
-        def hook_fwd(act: Tensor, hook: HookPoint) -> Tensor:
-            modified_act = act.clone()
-            
-            # interpolate for integrated gradients
-            modified_act.copy_(input_act)
-                    
-            return modified_act
-        
-        try:
-            with self._setup_error_term(self.use_error_term):
-                for sae_name, sae in self.dict_saes.items():
-                    sae.add_hook(
-                        lambda name: True, 
-                        partial(hook_sae_bwd, sae_name=sae_name),
-                        dir="bwd",
-                    )
-                self.model.add_hook(
-                    utils.get_act_name("embed"), hook_fwd, dir="fwd" # type: ignore
-                )
-                yield
-        finally:
-            self.model_setup()
-    
-    @contextmanager
-    def _setup_fwd_bwd_graddrop_sae_hook(
-        self, 
-        fwd_cache: Dict[str, Tensor],
-        bwd_cache: Dict[str, Tensor],
-        graddrop_layers: List[int],
-        pass_through_grad: bool,
-    ):
-        pass_through_cache = {}
-        def hook_sae_bwd(grad: Tensor, hook: HookPoint, sae_name: str) -> None:
-            if hook.name == sae_hook_name(sae_name):
-                create_list(bwd_cache, sae_hook_name(sae_name))
-                bwd_cache[sae_hook_name(sae_name)] += grad.detach()
-                
-            elif hook.name == output_hook_name(sae_name):
-                if self.use_error_term:
-                    # we have: output = recon + stop_grad(error_term)
-                    # so, the TRUE error_grad (if not stop_grad) is output_grad 
-                    # due to: output = recon + error_term
-                    create_list(bwd_cache, error_term_name(sae_name))
-                    bwd_cache[error_term_name(sae_name)] += grad.detach()
-                if pass_through_grad:
-                    pass_through_cache[output_hook_name(sae_name)] = grad.detach()
-                    
-            elif hook.name == input_hook_name(sae_name):
-                if pass_through_grad:
-                    # we have to modify inplace instead of grad = ... and then return grad
-                    # because, returning a tensor in bwd pass hook is buggy somehow
-                    grad.copy_(pass_through_cache[output_hook_name(sae_name)])
-                    
-        def hook_sae_fwd(act: Tensor, hook: HookPoint, sae_name: str) -> Tensor:
-            if hook.name == sae_hook_name(sae_name):
-                fwd_cache[sae_hook_name(sae_name)] = act.detach()
-                
-            elif error_term_name(sae_name) == hook.name and self.use_error_term:
-                fwd_cache[error_term_name(sae_name)] = act.detach()
-                    
-            return act
-                        
-        def hook_graddrop(grad: Tensor, hook: HookPoint, graddrop_layer: List[int] = graddrop_layers):
-            if hook.layer() in graddrop_layer:
-                grad.zero_() # zero grad for component
-        
-        try:
-            with self._setup_error_term(self.use_error_term):
-                for sae_name, sae in self.dict_saes.items():
-                    sae.add_hook(
-                        lambda name: True,
-                        partial(hook_sae_fwd, sae_name=sae_name),
-                        dir="fwd",
-                    )
-                    sae.add_hook(
-                        lambda name: True,
-                        partial(hook_sae_bwd, sae_name=sae_name),
-                        dir="bwd",
-                    )
-                self.model.add_hook(
-                    lambda name: "attn.hook_z" in name or "mlp.hook_post" in name, hook_graddrop, dir="bwd" # type: ignore
-                )
-                yield
-        finally:
-            self.model_setup()
-    
-    @contextmanager
     def _setup_fwd_bwd_grad_sae_hook(
         self, 
         fwd_cache: Dict[str, Tensor],
@@ -1476,58 +935,6 @@ class Feature_Graph(Graph):
             for sae in self.dict_saes.values():
                 sae.reset_hooks()
             self.model.reset_hooks()
-            
-    @contextmanager
-    def _setup_intervene_grad_sae_hook(
-        self, 
-        bwd_cache: Dict[str, Tensor],
-        corrupt_cache: Dict[str, Tensor],
-        pass_through_grad: bool,
-    ):
-        pass_through_cache = {}
-        def hook_sae_bwd(grad: Tensor, hook: HookPoint, sae_name: str) -> None:
-            if hook.name == sae_hook_name(sae_name) and hook.name in corrupt_cache:
-                bwd_cache[sae_hook_name(sae_name)] = grad.detach()
-                
-            elif hook.name == output_hook_name(sae_name):
-                if self.use_error_term and error_term_name(sae_name) in corrupt_cache:
-                    # we have: output = recon + stop_grad(error_term)
-                    # so, the TRUE error_grad (if not stop_grad) is output_grad 
-                    # due to: output = recon + error_term
-                    bwd_cache[error_term_name(sae_name)] = grad.detach()
-                if pass_through_grad:
-                    pass_through_cache[output_hook_name(sae_name)] = grad.detach()
-                    
-            elif hook.name == input_hook_name(sae_name):
-                if pass_through_grad:
-                    # we have to modify inplace instead of grad = ... and then return grad
-                    # because, returning a tensor in bwd pass hook is buggy somehow
-                    grad.copy_(pass_through_cache[output_hook_name(sae_name)])
-
-        def hook_bwd(grad: Tensor, hook: HookPoint) -> None:
-            if hook.name in corrupt_cache and hook.name not in bwd_cache:
-                bwd_cache[hook.name] = grad.detach()
-                    
-        def hook_fwd(act: Tensor, hook: HookPoint) -> Tensor:
-            modified_act = act.clone()
-            if hook.name in corrupt_cache:
-                modified_act.copy_(corrupt_cache[hook.name])
-                    
-            return modified_act
-        
-        try:
-            with self._setup_error_term(self.use_error_term):
-                for sae_name, sae in self.dict_saes.items():
-                    sae.add_hook(
-                        lambda name: True,
-                        partial(hook_sae_bwd, sae_name=sae_name),
-                        dir="bwd",
-                    )
-                self.model.add_hook(lambda name: name in corrupt_cache, hook_fwd, dir="fwd") # type: ignore
-                self.model.add_hook(lambda name: name in corrupt_cache, hook_bwd, dir="bwd") # type: ignore
-                yield
-        finally:
-            self.model_setup()
             
     @contextmanager
     def _setup_fwd_bwd_edge_grad_sae_hook(

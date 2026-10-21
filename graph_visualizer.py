@@ -12,13 +12,11 @@ from sae.SAE_Tools import *
 import torch.nn.functional as F
 from collections import defaultdict
 from sklearn.cluster import AgglomerativeClustering
-from sklearn.metrics import silhouette_score
 from llm_interpret_circuit_util import format_features_for_llm_clustering, call_llm_for_clustering, get_llm_clustering_prompt
 import random
 
 import ot 
-from scipy.spatial.distance import cdist, pdist, squareform
-from sklearn.metrics.pairwise import cosine_similarity
+from scipy.spatial.distance import pdist, squareform
 
 def _render_token_html(tokens: List[str], acts: List[float], target_idx: int, max_global: float) -> str:
     html_str = ""
@@ -279,300 +277,57 @@ class SAEGraphVisualizer:
         print(f"Clustering complete. Found {len(set(labels))} clusters.")
 
     @t.no_grad()
-    def run_clustering_ot_fast(
-        self, 
-        n_clusters=None, 
-        distance_threshold=1.5, 
-        max_points_per_feature=500, 
-        alpha=0.5, 
-        lambda_pen=1.0, 
-        n_intervals: int = 5, 
-        k_per_interval: int = 5, 
+    def run_clustering_ot_global_concat_fast(
+        self,
+        n_clusters=None,
+        distance_threshold=1.5,
+        max_points_per_feature=500,
+        n_intervals: int = 5,
+        k_per_interval: int = 5,
         buffer: int = 10
     ):
         """
-        Runs clustering on feature nodes using:
-        1. Semantic OT Distance (Projected to caching_hook)
-        2. Functional Structural Equivalence (Edge connections)
-        
-        *OPTIMIZED*: Uses cached `self.full_data_dict` to surgically extract 
-        only the required tokens, bypassing full-dataset inference.
+        Semantic OT clustering, the paper's compression method (Sections 5.2 and 6.1): each feature
+        is an activation-weighted distribution over its top tokens' hidden states, the reference
+        space R is the concatenated residual stream of every layer, and the supernodes are an
+        agglomerative clustering of the pairwise exact-EMD (W_1) distance matrix.
         """
-        temp_data = self.build_graph_json(n_intervals=n_intervals, k_per_interval=k_per_interval, buffer=buffer)
-        feature_nodes = [n for n in temp_data['nodes'] if n['type'] == 'feature']
-        
-        if not feature_nodes:
-            print("No feature nodes found to cluster.")
-            return
-
-        print(f"Processing {len(feature_nodes)} nodes for clustering...")
-        caching_hook = "ln_final.hook_normalized"
-        
-        all_feats = {} 
-        valid_nodes_dict = {} 
-        for node in feature_nodes:
-            feat, hook = node['feat_idx'], node['hook']
-            if hook not in self.sae_dict: continue
-            
-            if hook not in all_feats:
-                all_feats[hook] = []
-                valid_nodes_dict[hook] = []
-            all_feats[hook].append(feat)
-            valid_nodes_dict[hook].append(node)
-
-        # =====================================================================
-        # STEP 1: Query the Cache (Find Top Tokens Instantly)
-        # =====================================================================
-        print("Querying cached full_data_dict for top activations...")
-        B, S = self.data_toks.shape
-        feature_activations = {node['id']: {'b': [], 's': [], 'weights': []} for node in feature_nodes}
-
-        for hook_name, feat_list in all_feats.items():
-            if hook_name not in getattr(self, "full_data_dict", {}): 
-                continue
-                
-            vals, idxs = self.full_data_dict[hook_name] # (B, S, K) # type: ignore
-            
-            # Move to CPU to slice memory efficiently
-            vals = vals.cpu()
-            idxs = idxs.cpu()
-            
-            # Global valid mask
-            valid_mask = vals > 1e-3
-            valid_vals = vals[valid_mask]
-            valid_idxs = idxs[valid_mask]
-            
-            # Generate coordinates matching the mask
-            K = vals.shape[-1]
-            b_coords = t.arange(B).view(B, 1, 1).expand(B, S, K)[valid_mask]
-            s_coords = t.arange(S).view(1, S, 1).expand(B, S, K)[valid_mask]
-            
-            for i, feat_idx in enumerate(feat_list):
-                node_id = valid_nodes_dict[hook_name][i]['id']
-                
-                # Find exact occurrences of this feature
-                f_mask = valid_idxs == feat_idx
-                
-                f_vals = valid_vals[f_mask]
-                f_b = b_coords[f_mask]
-                f_s = s_coords[f_mask]
-                
-                # Apply max_points restriction instantly (Global Top-K Sort)
-                if len(f_vals) > max_points_per_feature:
-                    top_vals, top_idx = t.topk(f_vals, max_points_per_feature)
-                    f_vals = top_vals
-                    f_b = f_b[top_idx]
-                    f_s = f_s[top_idx]
-                    
-                feature_activations[node_id]['weights'] = f_vals # type: ignore
-                feature_activations[node_id]['b'] = f_b # type: ignore
-                feature_activations[node_id]['s'] = f_s # type: ignore
-
-        # =====================================================================
-        # STEP 2: Determine Required Subset & Coordinate Mapping
-        # =====================================================================
-        required_b_s_pairs = set()
-        for data in feature_activations.values():
-            for b, s in zip(data['b'], data['s']):
-                required_b_s_pairs.add((b.item(), s.item()))
-                
-        required_batches = sorted(list(set([b for b, s in required_b_s_pairs])))
-        num_needed_tokens = len(required_b_s_pairs)
-        
-        if num_needed_tokens == 0:
-            print("No valid activations found in cache.")
-            return
-
-        # Map (batch, seq) directly to a row index in our dense latents tensor
-        bs_to_row = {}
-        row_idx = 0
-        for orig_b in required_batches:
-            for s in range(S):
-                if (orig_b, s) in required_b_s_pairs:
-                    bs_to_row[(orig_b, s)] = row_idx
-                    row_idx += 1
-
-        d_model = self.model.cfg.d_model
-        global_latents = t.zeros((num_needed_tokens, d_model), dtype=t.float16, device='cpu')
-
-        # =====================================================================
-        # STEP 3: Surgical Forward Pass (Extract caching_hook latents only)
-        # =====================================================================
-        print(f"Executing surgical extraction on {len(required_batches)} required batches...")
-        
-        for i in tqdm(range(0, len(required_batches), self.batchsize), desc="Extracting Latents"):
-            batch_b_indices = required_batches[i : i+self.batchsize]
-            toks = self.data_toks[batch_b_indices].to(self.model.cfg.device)
-            
-            batch_cache = {}
-            def cache_hook_fn(tens: Tensor, hook: Any):
-                # Shape: (subset_batch, S, d_model)
-                batch_cache['acts'] = tens.detach().half()
-                
-            # Execute model (No SAE hooks needed!)
-            with self.model.hooks(fwd_hooks=[(caching_hook, cache_hook_fn)]):
-                self.model(toks)
-                
-            z_acts = batch_cache['acts']
-            
-            # Slot the specific tokens into the global flat tensor
-            for local_b, orig_b in enumerate(batch_b_indices):
-                for s in range(S):
-                    if (orig_b, s) in required_b_s_pairs:
-                        row = bs_to_row[(orig_b, s)]
-                        global_latents[row] = z_acts[local_b, s].cpu()
-
-        # =====================================================================
-        # STEP 4: Build OT Processed Sets
-        # =====================================================================
-        valid_node_list = []
-        processed_features = []
-        
-        for node in feature_nodes:
-            node_id = node['id']
-            f_b = feature_activations[node_id]['b']
-            f_s = feature_activations[node_id]['s']
-            W = feature_activations[node_id]['weights']
-            
-            if len(W) == 0: continue
-                
-            row_indices = [bs_to_row[(b.item(), s.item())] for b, s in zip(f_b, f_s)]
-            X = global_latents[row_indices].float() # Cast back up to float32 for math precision
-            
-            W_np = W.detach().cpu().float().numpy().astype(np.float64) # type: ignore
-            W_np = W_np / W_np.sum()
-            W_np[-1] = 1.0 - np.sum(W_np[:-1])
-
-            processed_features.append({'X': X, 'W': W_np})
-            valid_node_list.append(node)
-            
-        n_valid = len(valid_node_list)
-        if n_valid < 2: 
-            print("Not enough activated features to cluster. Skipping.")
-            return
-
-        # =====================================================================
-        # STEP 5: Compute Semantic OT Distance Matrix (D_sem)
-        # =====================================================================
-        print(f"Computing Optimal Transport distance matrix for {n_valid} features...")
-        D_sem = np.zeros((n_valid, n_valid))
-        device = self.model.cfg.device
-        
-        for i in tqdm(range(n_valid), desc="OT Distances"):
-            # Send target feature latents to GPU once
-            X_i_t = processed_features[i]['X'].to(device)
-            w_i = processed_features[i]['W']
-            
-            for j in range(i + 1, n_valid):
-                # Send comparison feature latents to GPU
-                X_j_t = processed_features[j]['X'].to(device)
-                w_j = processed_features[j]['W']
-                
-                # FAST PYTORCH CDIST
-                cost_matrix_t = t.cdist(X_i_t, X_j_t, p=2)
-                cost_matrix_np = cost_matrix_t.cpu().numpy().astype(np.float64)
-                
-                ot_dist = ot.emd2(w_i, w_j, cost_matrix_np)
-                D_sem[i, j] = ot_dist
-                D_sem[j, i] = ot_dist 
-
-        print(f"Optimal Transport distance matrix: min={D_sem.min():.4f}, max={D_sem.max():.4f}, mean={D_sem.mean():.4f}")
-        
-        # =====================================================================
-        # STEP 6: Compute Functional Wiring Distance Matrix (D_func)
-        # =====================================================================
-        print("Computing Functional Wiring Distance matrix...")
-        
-        all_nodes = temp_data['nodes']
-        N_all = len(all_nodes)
-        node_id_to_idx = {n['id']: i for i, n in enumerate(all_nodes)}
-        
-        W_adj = np.zeros((N_all, N_all), dtype=np.float32)
-        
-        for link in temp_data['links']:
-            src = node_id_to_idx.get(link['source'])
-            tgt = node_id_to_idx.get(link['target'])
-            if src is not None and tgt is not None:
-                W_adj[src, tgt] = link['value']
-                
-        max_w = np.max(np.abs(W_adj))
-        if max_w > 0:
-            W_adj = W_adj / max_w
-        np.fill_diagonal(W_adj, 1.0)
-        
-        valid_indices = [node_id_to_idx[n['id']] for n in valid_node_list]
-        V_signatures = np.zeros((n_valid, 2 * N_all), dtype=np.float32)
-        
-        for i, u in enumerate(valid_indices):
-            V_signatures[i, :N_all] = W_adj[u, :] 
-            V_signatures[i, N_all:] = W_adj[:, u] 
-            
-        D_func = squareform(pdist(V_signatures, metric='cosine'))
-        
-        print(f"Base Functional Wiring distance matrix: min={D_func.min():.4f}, max={D_func.max():.4f}, mean={D_func.mean():.4f}")
-        
-        D_func_penalized = np.copy(D_func)
-        for i in range(n_valid):
-            u = valid_indices[i]
-            for j in range(i + 1, n_valid):
-                v = valid_indices[j]
-                penalty = lambda_pen * max(0, -W_adj[u, v] - W_adj[v, u])
-                D_func_penalized[i, j] += penalty
-                D_func_penalized[j, i] += penalty
-                
-        print(f"Penalized Functional Wiring distance matrix: min={D_func_penalized.min():.4f}, max={D_func_penalized.max():.4f}, mean={D_func_penalized.mean():.4f}")
-
-        # =====================================================================
-        # STEP 7: Combine and Cluster (D_total)
-        # =====================================================================
-        print(f"Blending Semantic and Functional distances (alpha={alpha})...")
-        
-        max_sem = np.max(D_sem)
-        D_sem_norm = D_sem / max_sem if max_sem > 0 else D_sem
-        
-        max_func = np.max(D_func_penalized)
-        D_func_norm = D_func_penalized / max_func if max_func > 0 else D_func_penalized
-        
-        D_total = alpha * D_sem_norm + (1 - alpha) * D_func_norm
-
-        print("Fitting agglomerative clustering model...")
-        cluster_model = AgglomerativeClustering(
-            n_clusters=min(n_clusters, len(D_total)) if n_clusters is not None else None,
-            metric="precomputed", 
-            distance_threshold=distance_threshold if n_clusters is None else None,
-            linkage='complete' 
-        )
-        
-        labels = cluster_model.fit_predict(D_total)
-        
-        # =====================================================================
-        # STEP 8: Store Results
-        # =====================================================================
-        self.node_clusters = {n['id']: int(lbl) for n, lbl in zip(valid_node_list, labels)}
-        for node in valid_node_list:
-            for query_node in feature_nodes:
-                if query_node['id'] == node['id']:
-                    query_node['cluster'] = self.node_clusters[node['id']]
-            
-        print(f"Clustering complete. Found {len(set(labels))} clusters.")
-    
+        hooks = ["blocks.{layer}.hook_resid_post".format(layer=layer) for layer in range(self.model.cfg.n_layers)]
+        self._run_clustering_ot(hooks, n_clusters, distance_threshold, max_points_per_feature,
+                                n_intervals, k_per_interval, buffer)
 
     @t.no_grad()
-    def run_clustering_ot_global_concat_fast(
-        self, 
-        n_clusters=None, 
-        distance_threshold=1.5, 
-        max_points_per_feature=500, 
-        alpha=0.5, 
-        lambda_pen=1.0, 
-        n_intervals: int = 5, 
-        k_per_interval: int = 5, 
+    def run_clustering_ot_fast(
+        self,
+        n_clusters=None,
+        distance_threshold=1.5,
+        max_points_per_feature=500,
+        n_intervals: int = 5,
+        k_per_interval: int = 5,
         buffer: int = 10
     ):
         """
-        Runs clustering on feature nodes using Global Concatenated Network States.
-        - Optimized: Uses `self.full_data_dict` for surgical token extraction.
-        - Optimized: Uses PyTorch `t.cdist` on GPU for cost matrix computation.
+        The same OT clustering with R = the final-layer `ln_final.hook_normalized` states. Used by
+        the modular feature groups (Section 6.2, modular_feature_group.py).
+        """
+        self._run_clustering_ot(["ln_final.hook_normalized"], n_clusters, distance_threshold,
+                                max_points_per_feature, n_intervals, k_per_interval, buffer)
+
+    @t.no_grad()
+    def _run_clustering_ot(
+        self,
+        reference_hooks: List[str],
+        n_clusters=None,
+        distance_threshold=1.5,
+        max_points_per_feature=500,
+        n_intervals: int = 5,
+        k_per_interval: int = 5,
+        buffer: int = 10
+    ):
+        """
+        OT clustering with R = the concatenation of `reference_hooks`.
+        - Uses `self.full_data_dict` for surgical token extraction.
+        - Uses PyTorch `t.cdist` on GPU for cost matrix computation.
         """
         temp_data = self.build_graph_json(n_intervals=n_intervals, k_per_interval=k_per_interval, buffer=buffer)
         feature_nodes = [n for n in temp_data['nodes'] if n['type'] == 'feature']
@@ -584,9 +339,7 @@ class SAEGraphVisualizer:
         print(f"Processing {len(feature_nodes)} nodes for clustering...")
         device = self.model.cfg.device
         
-        saes = list(self.sae_dict.values())
-        # ordered_model_hooks = list(dict.fromkeys([sae.cfg.hook_name for sae in saes]))
-        ordered_model_hooks = ["blocks.{layer}.hook_resid_post".format(layer=layer) for layer in range(self.model.cfg.n_layers)]
+        ordered_model_hooks = list(reference_hooks)
         print(f"Concatenating representations across {len(ordered_model_hooks)} hooks...")
         
         all_feats = {} 
@@ -749,54 +502,10 @@ class SAEGraphVisualizer:
         print(f"Optimal Transport distance matrix: min={D_sem.min():.4f}, max={D_sem.max():.4f}, mean={D_sem.mean():.4f}")
         
         # =====================================================================
-        # STEP 6: Compute Functional Wiring Distance Matrix (D_func)
+        # STEP 6: Cluster
         # =====================================================================
-        print("Computing Functional Wiring Distance matrix...")
-        all_nodes = temp_data['nodes']
-        N_all = len(all_nodes)
-        node_id_to_idx = {n['id']: i for i, n in enumerate(all_nodes)}
-        
-        W_adj = np.zeros((N_all, N_all), dtype=np.float32)
-        for link in temp_data['links']:
-            src = node_id_to_idx.get(link['source'])
-            tgt = node_id_to_idx.get(link['target'])
-            if src is not None and tgt is not None:
-                W_adj[src, tgt] = link['value']
-                
-        max_w = np.max(np.abs(W_adj))
-        if max_w > 0: W_adj = W_adj / max_w
-        np.fill_diagonal(W_adj, 1.0)
-        
-        valid_indices = [node_id_to_idx[n['id']] for n in valid_node_list]
-        V_signatures = np.zeros((n_valid, 2 * N_all), dtype=np.float32)
-        
-        for i, u in enumerate(valid_indices):
-            V_signatures[i, :N_all] = W_adj[u, :] 
-            V_signatures[i, N_all:] = W_adj[:, u] 
-            
-        D_func = squareform(pdist(V_signatures, metric='cosine'))
-        
-        D_func_penalized = np.copy(D_func)
-        for i in range(n_valid):
-            u = valid_indices[i]
-            for j in range(i + 1, n_valid):
-                v = valid_indices[j]
-                penalty = lambda_pen * max(0, -W_adj[u, v] - W_adj[v, u])
-                D_func_penalized[i, j] += penalty
-                D_func_penalized[j, i] += penalty
-
-        # =====================================================================
-        # STEP 7: Combine and Cluster 
-        # =====================================================================
-        print(f"Blending Semantic and Functional distances (alpha={alpha})...")
-        
         max_sem = np.max(D_sem)
-        D_sem_norm = D_sem / max_sem if max_sem > 0 else D_sem
-        
-        max_func = np.max(D_func_penalized)
-        D_func_norm = D_func_penalized / max_func if max_func > 0 else D_func_penalized
-        
-        D_total = alpha * D_sem_norm + (1 - alpha) * D_func_norm
+        D_total = D_sem / max_sem if max_sem > 0 else D_sem
 
         print("Fitting agglomerative clustering model...")
         cluster_model = AgglomerativeClustering(
@@ -821,18 +530,13 @@ class SAEGraphVisualizer:
         self, 
         n_clusters=None, 
         distance_threshold=1.5, 
-        lambda_pen=1.0, 
         n_intervals: int = 5, 
         k_per_interval: int = 5, 
         buffer: int = 10
     ):
         """
-        Runs clustering on feature nodes using:
-        1. Semantic OT Distance (Projected to caching_hook)
-        2. Functional Structural Equivalence (Edge connections)
-        
-        *OPTIMIZED*: Uses cached `self.full_data_dict` to surgically extract 
-        only the required tokens, bypassing full-dataset inference.
+        Attrib baseline: clusters feature nodes by the cosine distance between their attribution-
+        edge signatures (each node's outgoing and incoming edge weights in the circuit).
         """
         temp_data = self.build_graph_json(n_intervals=n_intervals, k_per_interval=k_per_interval, buffer=buffer)
         feature_nodes = [n for n in temp_data['nodes'] if n['type'] == 'feature']
@@ -946,19 +650,8 @@ class SAEGraphVisualizer:
         
         print(f"Base Functional Wiring distance matrix: min={D_func.min():.4f}, max={D_func.max():.4f}, mean={D_func.mean():.4f}")
         
-        D_func_penalized = np.copy(D_func)
-        for i in range(n_valid):
-            u = valid_indices[i]
-            for j in range(i + 1, n_valid):
-                v = valid_indices[j]
-                penalty = lambda_pen * max(0, -W_adj[u, v] - W_adj[v, u])
-                D_func_penalized[i, j] += penalty
-                D_func_penalized[j, i] += penalty
-                
-        print(f"Penalized Functional Wiring distance matrix: min={D_func_penalized.min():.4f}, max={D_func_penalized.max():.4f}, mean={D_func_penalized.mean():.4f}")
-        
-        max_func = np.max(D_func_penalized)
-        D_func_norm = D_func_penalized / max_func if max_func > 0 else D_func_penalized
+        max_func = np.max(D_func)
+        D_func_norm = D_func / max_func if max_func > 0 else D_func
 
         print("Fitting agglomerative clustering model...")
         cluster_model = AgglomerativeClustering(
@@ -1236,134 +929,8 @@ class SAEGraphVisualizer:
             # ==========================================
             if fallback_method == "feature_flow":
                 self.run_clustering_decoder(method="feature_flow", n_clusters=n_clusters, n_intervals=n_intervals, k_per_interval=k_per_interval, buffer=buffer)
-            elif fallback_method == "ot":
-                self.run_clustering_ot_global_concat_fast(n_clusters=n_clusters, n_intervals=n_intervals, k_per_interval=k_per_interval, buffer=buffer)
             else:
                 print(f"Unknown fallback method '{fallback_method}'. Features will remain unclustered.")
-    
-    def evaluate_clustering(self, epsilon=1e-9):
-        """
-        Calculates the Intra-Cluster Synergy (S_intra) and 
-        Inter-Cluster Homogeneity (S_inter) for the current clustering.
-        """
-        graph_data = self.build_graph_json()
-        
-        # 1. Map nodes to clusters and filter valid clustered nodes
-        node_to_cluster = {}
-        for n in graph_data['nodes']:
-            if n.get('cluster') is not None:
-                node_to_cluster[n['id']] = n['cluster']
-                
-        if not node_to_cluster:
-            print("No clustered nodes found. Run clustering first.")
-            return None
-            
-        # Map valid nodes to integer indices for fast numpy operations
-        valid_nodes = list(node_to_cluster.keys())
-        node_to_idx = {node_id: i for i, node_id in enumerate(valid_nodes)}
-        N = len(valid_nodes)
-        
-        # 2. Build the Adjacency Matrix (W) for clustered nodes
-        W = np.zeros((N, N), dtype=np.float32)
-        for link in graph_data['links']:
-            src = link['source']
-            tgt = link['target']
-            if src in node_to_idx and tgt in node_to_idx:
-                idx_src = node_to_idx[src]
-                idx_tgt = node_to_idx[tgt]
-                W[idx_src, idx_tgt] = link['value']
-                
-        # 3. Group node indices by cluster ID
-        unique_clusters = list(set(node_to_cluster.values()))
-        K = len(unique_clusters)
-        cluster_to_idx = {c: i for i, c in enumerate(unique_clusters)}
-        
-        cluster_node_indices = {c: [] for c in unique_clusters}
-        for node_id, cluster_id in node_to_cluster.items():
-            cluster_node_indices[cluster_id].append(node_to_idx[node_id])
-            
-        # =====================================================================
-        # S_intra: Intra-Cluster Synergy 
-        # Ratio of positive edge weights to total absolute edge weights within C
-        # =====================================================================
-        s_intra_scores = {}
-        for c, indices in cluster_node_indices.items():
-            if len(indices) <= 1:
-                # A single node has perfect synergy by definition
-                s_intra_scores[c] = 1.0 
-                continue
-                
-            # Extract the internal routing submatrix for this cluster
-            idx_mesh = np.ix_(indices, indices)
-            W_c = W[idx_mesh].copy()
-            
-            # Zero out the diagonal (we only care about i != j)
-            np.fill_diagonal(W_c, 0.0)
-            
-            positive_sum = np.sum(np.maximum(0, W_c))
-            absolute_sum = np.sum(np.abs(W_c))
-            
-            if absolute_sum < epsilon:
-                # If the cluster is entirely sparse internally, it doesn't violate synergy
-                s_intra_scores[c] = 1.0 
-            else:
-                s_intra_scores[c] = positive_sum / (absolute_sum + epsilon)
-                
-        global_s_intra = np.mean(list(s_intra_scores.values()))
-        
-        # =====================================================================
-        # S_inter: Inter-Cluster Homogeneity
-        # Average pairwise cosine similarity of macroscopic wiring signatures
-        # =====================================================================
-        
-        # First, build V matrix: V[i, k] is the sum of weights from node i to all nodes in cluster k
-        V = np.zeros((N, K), dtype=np.float32)
-        for i in range(N):
-            for c, indices in cluster_node_indices.items():
-                k_idx = cluster_to_idx[c]
-                V[i, k_idx] = np.sum(W[i, indices])
-                
-        s_inter_scores = {}
-        for c, indices in cluster_node_indices.items():
-            if len(indices) <= 1:
-                # A single node is perfectly homogeneous with itself
-                s_inter_scores[c] = 1.0 
-                continue
-                
-            # Extract macroscopic wiring signatures for nodes in this cluster
-            V_c = V[indices, :] # Shape: (|C|, K)
-            
-            # Compute pairwise cosine similarity
-            # (sklearn handles zero-vectors gracefully by returning 0 similarity)
-            sim_matrix = cosine_similarity(V_c)
-            
-            # We want the average of the upper triangle, excluding the diagonal (i != j)
-            n_nodes = len(indices)
-            upper_tri_indices = np.triu_indices(n_nodes, k=1)
-            pairwise_sims = sim_matrix[upper_tri_indices]
-            
-            if len(pairwise_sims) == 0:
-                s_inter_scores[c] = 1.0
-            else:
-                s_inter_scores[c] = np.mean(pairwise_sims)
-                
-        global_s_inter = np.mean(list(s_inter_scores.values()))
-        
-        # =====================================================================
-        # Report Results
-        # =====================================================================
-        print(f"\n--- Clustering Evaluation ---")
-        print(f"Total Clusters Evaluated: {K}")
-        print(f"Global S_intra (Synergy):     {global_s_intra:.4f}  [1.0 = Perfect, no internal conflict]")
-        print(f"Global S_inter (Homogeneity): {global_s_inter:.4f}  [1.0 = Perfect, identical external wiring]")
-        print(f"-----------------------------\n")
-        
-        return {
-            "global_s_intra": global_s_intra,
-            "global_s_inter": global_s_inter,
-            "cluster_s_intra": s_intra_scores,
-            "cluster_s_inter": s_inter_scores
-        }
     
     def get_layer_fallback(self, hook_name: str) -> int:
         match = re.search(r'\.(\d+)\.', hook_name)

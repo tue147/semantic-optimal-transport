@@ -15,24 +15,6 @@ LossPerToken = Float[torch.Tensor, "batch pos-1"]
 Loss = Union[SingleLoss, LossPerToken]
 
 
-def get_deep_attr(obj: Any, path: str):
-    """Helper function to get a nested attribute from a object.
-    In practice used to access HookedTransformer HookPoints (eg model.blocks[0].attn.hook_z)
-
-    Args:
-        obj: Any object. In practice, this is a HookedTransformer (or subclass)
-        path: str. The path to the attribute you want to access. (eg "blocks.0.attn.hook_z")
-
-    returns:
-        Any. The attribute at the end of the path
-    """
-    parts = path.split(".")
-    # Navigate to the last component in the path
-    for part in parts:
-        obj = obj[int(part)] if part.isdigit() else getattr(obj, part)
-    return obj
-
-
 def set_deep_attr(obj: Any, path: str, value: Any):
     """Helper function to change the value of a nested attribute from a object.
     In practice used to swap HookedTransformer HookPoints (eg model.blocks[0].attn.hook_z) with HookedSAEs and vice versa
@@ -217,84 +199,6 @@ class _HookedSAE(HookedRootModule):
             saes=saes, reset_saes_end=reset_saes_end, use_error_term=use_error_term
         ):
             return self(*model_args, **model_kwargs)
-
-    def run_with_cache_with_saes(
-        self,
-        *model_args: Any,
-        saes: Union[Any, List[Any]] = [],
-        reset_saes_end: bool = True,
-        use_error_term: Optional[bool] = None,
-        remove_batch_dim: bool = False,
-        **kwargs: Any,
-    ) -> Tuple[
-        Union[
-            None,
-            Float[torch.Tensor, "batch pos d_vocab"],
-            Loss,
-            Tuple[Float[torch.Tensor, "batch pos d_vocab"], Loss],
-        ],
-        Union[ActivationsStore, Dict[str, torch.Tensor]],
-    ]:
-        """Wrapper around 'run_with_cache' in HookedTransformer.
-
-        Attaches given SAEs before running the model with cache and then removes them.
-        By default, will reset all SAEs to original state after.
-
-        Args:
-            *model_args: Positional arguments for the model forward pass
-            saes: (Union[HookedSAE, List[HookedSAE]]) The SAEs to be attached for this forward pass
-            reset_saes_end: (bool) If True, all SAEs added during this run are removed at the end, and previously attached SAEs are restored to their original state. Default is True.
-            use_error_term: (Optional[bool]) If provided, will set the use_error_term attribute of all SAEs attached during this run to this value. Determines whether the SAE returns input or reconstruction. Defaults to None.
-            return_cache_object: (bool) if True, this will return an ActivationCache object, with a bunch of
-                useful HookedTransformer specific methods, otherwise it will return a dictionary of
-                activations as in HookedRootModule.
-            remove_batch_dim: (bool) Whether to remove the batch dimension (only works for batch_size==1). Defaults to False.
-            **kwargs: Keyword arguments for the model forward pass
-        """
-        with self.saes(
-            saes=saes, reset_saes_end=reset_saes_end, use_error_term=use_error_term
-        ):
-            return self.run_with_cache(  # type: ignore
-                *model_args,
-                remove_batch_dim=remove_batch_dim,
-                **kwargs,
-            )
-
-    def run_with_hooks_with_saes(
-        self,
-        *model_args: Any,
-        saes: Union[Any, List[Any]] = [],
-        reset_saes_end: bool = True,
-        fwd_hooks: List[Tuple[Union[str, Callable], Callable]] = [],  # type: ignore
-        bwd_hooks: List[Tuple[Union[str, Callable], Callable]] = [],  # type: ignore
-        reset_hooks_end: bool = True,
-        clear_contexts: bool = False,
-        **model_kwargs: Any,
-    ):
-        """Wrapper around 'run_with_hooks' in HookedTransformer.
-
-        Attaches the given SAEs to the model before running the model with hooks and then removes them.
-        By default, will reset all SAEs to original state after.
-
-        Args:
-            *model_args: Positional arguments for the model forward pass
-            act_names: (Union[HookedSAE, List[HookedSAE]]) The SAEs to be attached for this forward pass
-            reset_saes_end: (bool) If True, all SAEs added during this run are removed at the end, and previously attached SAEs are restored to their original state. (default: True)
-            fwd_hooks: (List[Tuple[Union[str, Callable], Callable]]) List of forward hooks to apply
-            bwd_hooks: (List[Tuple[Union[str, Callable], Callable]]) List of backward hooks to apply
-            reset_hooks_end: (bool) Whether to reset the hooks at the end of the forward pass (default: True)
-            clear_contexts: (bool) Whether to clear the contexts at the end of the forward pass (default: False)
-            **model_kwargs: Keyword arguments for the model forward pass
-        """
-        with self.saes(saes=saes, reset_saes_end=reset_saes_end):
-            return self.run_with_hooks(
-                *model_args,
-                fwd_hooks=fwd_hooks,
-                bwd_hooks=bwd_hooks,
-                reset_hooks_end=reset_hooks_end,
-                clear_contexts=clear_contexts,
-                **model_kwargs,
-            )
 
     @contextmanager
     def saes(

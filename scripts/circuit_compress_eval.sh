@@ -37,7 +37,7 @@ source "$_COMMON"
 mkdir -p logs
 
 # ---- model / SAE -----------------------------------------------------------------------------
-# Presets: gemma_mlp | gemma_ds | gpt2_ds | llama_post | qwen_mlp
+# Presets: gemma_mlp | gpt2_ds
 PRESET="${PRESET:?set PRESET}"
 
 # ---- prompt set ------------------------------------------------------------------------------
@@ -79,9 +79,8 @@ THRESHOLD=1                 # 1 with percen keeps all edges
 DIRECT_EFFECT=false         # false = total effect, which the causal clustering needs
 
 # ---- clustering benchmark --------------------------------------------------------------------
-# naive | ot | ot_01 | ot_05 | ot_10 | ot_0
-#       | ot_global | ot_global_01 | ot_global_05 | ot_global_10 | ot_global_0
-#       | mech_permute_llama | feat_flow_llama | llm | causal
+# ot_global_10 (Our) | feat_flow_llama (FeatFlow) | mech_permute_llama (Match) | llm (LLM Sel)
+# | causal (Attrib) | naive (Our Naive, Table 7)
 CLUSTER_TYPES="${CLUSTER_TYPES:-ot_global_10 feat_flow_llama mech_permute_llama llm causal naive}"
 N_CLUSTERS="${N_CLUSTERS:-5}"
 
@@ -89,12 +88,6 @@ N_CLUSTERS="${N_CLUSTERS:-5}"
 # Leave empty for a single unseeded run under the original file name. Set e.g. SEEDS="1 2 3" to
 # run the whole sweep once per seed; each output then gets a _seed<N> suffix.
 SEEDS="1"                   # paper protocol: ONE eval per circuit (seeded for reproducibility)
-
-# Fast seed sweep: build the circuit + graph + clustering ONCE per prompt (with CLUSTER_SEED) and
-# only re-run the LLM eval per seed, aggregating into one JSON per cluster type (mean/std/90%CI +
-# every model decision). Requires SEEDS to be non-empty. Leaves the .pt path untouched when false.
-AGGREGATE_SEEDS=false
-CLUSTER_SEED=0
 
 # ---- LLM eval --------------------------------------------------------------------------------
 # JUDGE: llama70b-vllm          -> self-hosted on this job's GPU (no key, no cost, no rate limit)
@@ -250,7 +243,6 @@ fi
 if [[ -n "$JUDGE_EFFORT" ]]; then
     EXTRA_ARGS+=(--judge_effort "$JUDGE_EFFORT")
 fi
-EXTRA_ARGS+=(--aggregate_seeds "$AGGREGATE_SEEDS" --cluster_seed "$CLUSTER_SEED")
 
 python circuit_compress_eval.py \
     --preset "$PRESET" \

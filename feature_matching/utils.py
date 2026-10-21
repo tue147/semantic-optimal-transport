@@ -159,15 +159,3 @@ def compute_sinkhorn_ot_gpu(
 
     return float(true_dist.item())
 
-
-def cloud_max_norm(*processed: Dict[int, Any]) -> float:
-    """Largest point norm over one or more `processed` cloud dicts ({f_id: {'X': (n, d), ...}}).
-
-    The natural argument for `compute_sinkhorn_ot_gpu`'s `scale`: dividing by it puts every cloud
-    in the unit ball with a single, candidate-independent factor.
-    """
-    m = 0.0
-    for proc in processed:
-        for entry in proc.values():
-            m = max(m, float(entry["X"].norm(dim=1).max()))
-    return m

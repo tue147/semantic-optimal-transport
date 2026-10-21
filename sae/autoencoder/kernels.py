@@ -519,62 +519,6 @@ def triton_add_mul_kernel(
 
 
 
-def triton_sum_dim0_in_fp32(xs):
-    a, b = xs.shape
-
-    assert xs.is_contiguous()
-    assert xs.dtype == torch.float16
-
-    BLOCK_SIZE_A = min(triton.next_power_of_2(a), 512)
-    BLOCK_SIZE_B = 64  # cache line is 128 bytes
-
-    out = torch.zeros(b, dtype=torch.float32, device=xs.device)
-
-    grid = lambda META: (triton.cdiv(b, META["BLOCK_SIZE_B"]),)
-
-    triton_sum_dim0_in_fp32_kernel[grid](
-        xs,
-        out,
-        stride_a=xs.stride(0),
-        a=a,
-        b=b,
-        BLOCK_SIZE_A=BLOCK_SIZE_A,
-        BLOCK_SIZE_B=BLOCK_SIZE_B,
-    )
-
-    return out
-
-
-@triton.jit
-def triton_sum_dim0_in_fp32_kernel(
-    xs_ptr,
-    out_ptr,
-    stride_a,
-    a,
-    b,
-    BLOCK_SIZE_A: tl.constexpr,
-    BLOCK_SIZE_B: tl.constexpr,
-):
-    # each program handles 64 columns of xs
-    pid = tl.program_id(0)
-    offsets_b = tl.arange(0, BLOCK_SIZE_B) + pid * BLOCK_SIZE_B
-
-    all_out = tl.zeros((BLOCK_SIZE_B,), dtype=tl.float32)
-
-    for i in range(0, a, BLOCK_SIZE_A):
-        offsets_a = tl.arange(0, BLOCK_SIZE_A) + i
-        xs = tl.load(
-            xs_ptr + offsets_a[:, None] * stride_a + offsets_b[None, :],
-            mask=(offsets_a < a)[:, None] & (offsets_b < b)[None, :],
-            other=0,
-        )
-        xs = xs.to(tl.float32)
-        out = tl.sum(xs, axis=0)
-        all_out += out
-
-    tl.store(out_ptr + offsets_b, all_out, mask=offsets_b < b)
-
-
 def mse(
     output,
     target,
@@ -615,21 +559,6 @@ def mse(
             return res, None
 
     return _MSE.apply(output, target).mean()
-
-
-def normalized_mse(recon: torch.Tensor, xs: torch.Tensor) -> torch.Tensor:
-    # only used for auxk
-    xs_mu = (
-        triton_sum_dim0_in_fp32(xs) / xs.shape[0]
-        if xs.dtype == torch.float16
-        else xs.mean(dim=0)
-    )
-
-    loss = mse(recon, xs) / mse(
-        xs_mu[None, :].broadcast_to(xs.shape), xs
-    )
-
-    return loss
 
 
 @triton.jit
