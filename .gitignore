@@ -1,0 +1,25 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# data, caches and outputs
+data/
+checkpoints/
+results/
+case_studies/
+logs/
+wandb_logs/
+*.pt
+*.ckpt
+*.html
+*.out
+*.csv
+loss_below_*_sequences.json
+*_seedagg*.json
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.conda_envs/
