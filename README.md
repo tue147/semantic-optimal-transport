@@ -1,14 +1,11 @@
 # Semantic Optimal Transport for SAE Feature Matching and Circuit Compression
 
 Code for *Semantic Optimal Transport for Sparse Autoencoder Feature Matching and Circuit
-Compression* (Tue M. Cao, Nguyen Do, My T. Thai; [arXiv:2605.28567](https://arxiv.org/abs/2605.28567)).
+Compression* (Tue M. Cao, Nguyen Do, My T. Thai; [arXiv:2605.28567](https://arxiv.org/abs/2605.28567)) (NeurIPS-2026).
 
-A sparse-autoencoder feature is represented not by its decoder vector but by the
-activation-weighted distribution of the hidden states that express it. Distributions from different
-layers are projected into a shared reference space and compared with the Wasserstein distance. The
-same distance gives cross-layer **feature matching** (the reference space is the target layer) and
-**circuit compression** (the reference space concatenates all layers, and circuit nodes are grouped
-into supernodes by agglomerative clustering).
+We solve the problem of finding sparse autoencoder features with similar meaning across manifolds. We represent a feature as distribution based on the latent representation that the feature activates. Distributions from different
+layers are projected into a shared reference space and the semantic difference is represented as the Wasserstein disstance between any pair of feature distribution. This distance allows cross-layer
+**circuit compression** (compressing feature circuits nodes that have similar meaning into with supernodes) and **feature matching** (matching features with similar meaning across layers or manifolds).
 
 ## Setup
 
